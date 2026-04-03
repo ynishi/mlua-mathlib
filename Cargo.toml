@@ -1,0 +1,21 @@
+[package]
+name = "mlua-mathlib"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "Math library for mlua — RNG, distributions, and descriptive statistics"
+license = "MIT OR Apache-2.0"
+authors = ["Yutaka Nishimura"]
+readme = "README.md"
+repository = "https://github.com/ynishi/mlua-mathlib"
+homepage = "https://github.com/ynishi/mlua-mathlib"
+keywords = ["lua", "mlua", "math", "statistics", "random"]
+categories = ["mathematics", "api-bindings", "science"]
+
+[dependencies]
+mlua = { version = "0.11", features = ["lua54", "vendored"] }
+rand = "0.9"
+rand_distr = "0.5"
+
+[dev-dependencies]
+approx = "0.5"
