@@ -8,6 +8,13 @@ use rand_distr::{
 use crate::rng::LuaRng;
 
 pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
+    register_continuous(lua, t)?;
+    register_discrete(lua, t)?;
+    register_multivariate(lua, t)?;
+    Ok(())
+}
+
+fn register_continuous(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     t.set(
         "normal_sample",
         lua.create_function(
@@ -67,6 +74,62 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     )?;
 
     t.set(
+        "uniform_sample",
+        lua.create_function(|_, (rng, low, high): (LuaUserDataRef<LuaRng>, f64, f64)| {
+            let dist = Uniform::new(low, high)
+                .map_err(|e| LuaError::runtime(format!("uniform_sample: {e}")))?;
+            let mut r = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("uniform_sample: RNG is already borrowed"))?;
+            Ok(dist.sample(&mut *r))
+        })?,
+    )?;
+
+    t.set(
+        "lognormal_sample",
+        lua.create_function(|_, (rng, mu, sigma): (LuaUserDataRef<LuaRng>, f64, f64)| {
+            let dist = LogNormal::new(mu, sigma)
+                .map_err(|e| LuaError::runtime(format!("lognormal_sample: {e}")))?;
+            let mut r = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("lognormal_sample: RNG is already borrowed"))?;
+            Ok(dist.sample(&mut *r))
+        })?,
+    )?;
+
+    t.set(
+        "student_t_sample",
+        lua.create_function(|_, (rng, df): (LuaUserDataRef<LuaRng>, f64)| {
+            let dist = StudentT::new(df)
+                .map_err(|e| LuaError::runtime(format!("student_t_sample: {e}")))?;
+            let mut r = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("student_t_sample: RNG is already borrowed"))?;
+            Ok(dist.sample(&mut *r))
+        })?,
+    )?;
+
+    t.set(
+        "chi_squared_sample",
+        lua.create_function(|_, (rng, df): (LuaUserDataRef<LuaRng>, f64)| {
+            let dist = ChiSquared::new(df)
+                .map_err(|e| LuaError::runtime(format!("chi_squared_sample: {e}")))?;
+            let mut r = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("chi_squared_sample: RNG is already borrowed"))?;
+            Ok(dist.sample(&mut *r))
+        })?,
+    )?;
+
+    Ok(())
+}
+
+fn register_discrete(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
+    t.set(
         "poisson_sample",
         lua.create_function(|_, (rng, lambda): (LuaUserDataRef<LuaRng>, f64)| {
             let dist = Poisson::new(lambda)
@@ -87,34 +150,6 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     )?;
 
     t.set(
-        "uniform_sample",
-        lua.create_function(|_, (rng, low, high): (LuaUserDataRef<LuaRng>, f64, f64)| {
-            let dist = Uniform::new(low, high)
-                .map_err(|e| LuaError::runtime(format!("uniform_sample: {e}")))?;
-            let mut r = rng
-                .0
-                .try_borrow_mut()
-                .map_err(|_| LuaError::runtime("uniform_sample: RNG is already borrowed"))?;
-            Ok(dist.sample(&mut *r))
-        })?,
-    )?;
-
-    // ── v0.2 distributions ──────────────────────────────
-
-    t.set(
-        "lognormal_sample",
-        lua.create_function(|_, (rng, mu, sigma): (LuaUserDataRef<LuaRng>, f64, f64)| {
-            let dist = LogNormal::new(mu, sigma)
-                .map_err(|e| LuaError::runtime(format!("lognormal_sample: {e}")))?;
-            let mut r = rng
-                .0
-                .try_borrow_mut()
-                .map_err(|_| LuaError::runtime("lognormal_sample: RNG is already borrowed"))?;
-            Ok(dist.sample(&mut *r))
-        })?,
-    )?;
-
-    t.set(
         "binomial_sample",
         lua.create_function(|_, (rng, n, p): (LuaUserDataRef<LuaRng>, u64, f64)| {
             let dist = Binomial::new(n, p)
@@ -128,6 +163,10 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         })?,
     )?;
 
+    Ok(())
+}
+
+fn register_multivariate(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     t.set(
         "dirichlet_sample",
         lua.create_function(
@@ -143,7 +182,6 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                     let v: f64 = alphas_table.raw_get(i)?;
                     alphas.push(v);
                 }
-                // Dirichlet via Gamma sampling (dynamic size, no const generics needed)
                 let mut rng_mut = rng
                     .0
                     .try_borrow_mut()
@@ -188,7 +226,6 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                 }
                 let dist = WeightedIndex::new(&weights)
                     .map_err(|e| LuaError::runtime(format!("categorical_sample: {e}")))?;
-                // Return 1-based index for Lua convention
                 let mut r = rng.0.try_borrow_mut().map_err(|_| {
                     LuaError::runtime("categorical_sample: RNG is already borrowed")
                 })?;
@@ -196,32 +233,6 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                 Ok(idx)
             },
         )?,
-    )?;
-
-    t.set(
-        "student_t_sample",
-        lua.create_function(|_, (rng, df): (LuaUserDataRef<LuaRng>, f64)| {
-            let dist = StudentT::new(df)
-                .map_err(|e| LuaError::runtime(format!("student_t_sample: {e}")))?;
-            let mut r = rng
-                .0
-                .try_borrow_mut()
-                .map_err(|_| LuaError::runtime("student_t_sample: RNG is already borrowed"))?;
-            Ok(dist.sample(&mut *r))
-        })?,
-    )?;
-
-    t.set(
-        "chi_squared_sample",
-        lua.create_function(|_, (rng, df): (LuaUserDataRef<LuaRng>, f64)| {
-            let dist = ChiSquared::new(df)
-                .map_err(|e| LuaError::runtime(format!("chi_squared_sample: {e}")))?;
-            let mut r = rng
-                .0
-                .try_borrow_mut()
-                .map_err(|_| LuaError::runtime("chi_squared_sample: RNG is already borrowed"))?;
-            Ok(dist.sample(&mut *r))
-        })?,
     )?;
 
     Ok(())

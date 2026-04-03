@@ -7,7 +7,7 @@ use std::cell::RefCell;
 ///
 /// Uses `RefCell` for interior mutability — Lua is single-threaded so
 /// this is safe. `StdRng` uses ChaCha12 which passes all TestU01 suites.
-pub(crate) struct LuaRng(pub RefCell<StdRng>);
+pub(crate) struct LuaRng(pub(crate) RefCell<StdRng>);
 
 impl LuaUserData for LuaRng {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {

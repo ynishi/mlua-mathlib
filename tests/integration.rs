@@ -46,7 +46,7 @@ fn rng_int_range() {
         return true
     "#;
     let ok: bool = lua.load(code).eval().unwrap();
-    assert!(ok);
+    assert!(ok, "rng_int values must be in [1, 6]");
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn exp_sample_positive() {
         return true
     "#;
     let ok: bool = lua.load(code).eval().unwrap();
-    assert!(ok);
+    assert!(ok, "Exp samples must be positive");
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn poisson_sample_non_negative() {
         return true
     "#;
     let ok: bool = lua.load(code).eval().unwrap();
-    assert!(ok);
+    assert!(ok, "Poisson samples must be non-negative");
 }
 
 #[test]
@@ -307,7 +307,7 @@ fn lognormal_sample_positive() {
         return true
     "#;
     let ok: bool = lua.load(code).eval().unwrap();
-    assert!(ok);
+    assert!(ok, "LogNormal samples must be positive");
 }
 
 #[test]
@@ -322,7 +322,7 @@ fn binomial_sample_range() {
         return true
     "#;
     let ok: bool = lua.load(code).eval().unwrap();
-    assert!(ok);
+    assert!(ok, "Binomial(10, 0.5) samples must be in [0, 10]");
 }
 
 #[test]
@@ -384,7 +384,7 @@ fn chi_squared_sample_positive() {
         return true
     "#;
     let ok: bool = lua.load(code).eval().unwrap();
-    assert!(ok);
+    assert!(ok, "Chi-squared samples must be positive");
 }
 
 // ── v0.2 Special Functions ──────────────────────────────
@@ -596,7 +596,7 @@ fn histogram_basic() {
         return total == 10 and #h.counts == 5 and #h.edges == 6
     "#;
     let ok: bool = lua.load(code).eval().unwrap();
-    assert!(ok);
+    assert!(ok, "histogram: 10 values, 5 bins, 6 edges expected");
 }
 
 #[test]

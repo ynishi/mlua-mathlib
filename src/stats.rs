@@ -73,7 +73,7 @@ fn histogram_bin(values: &[f64], bins: usize, min: f64, max: f64) -> (Vec<u64>, 
     let range = max - min;
     if range <= max.abs() * f64::EPSILON {
         let mut counts = vec![0u64; bins];
-        counts[0] = values.len() as u64;
+        counts[0] = u64::try_from(values.len()).unwrap_or(u64::MAX);
         return (counts, 1.0 / bins as f64);
     }
     let width = range / bins as f64;
@@ -117,6 +117,13 @@ fn softmax_impl(values: &[f64]) -> Vec<f64> {
 }
 
 pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
+    register_descriptive(lua, t)?;
+    register_bivariate(lua, t)?;
+    register_transforms(lua, t)?;
+    Ok(())
+}
+
+fn register_descriptive(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     t.set(
         "mean",
         lua.create_function(|_, table: LuaTable| {
@@ -188,8 +195,10 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         })?,
     )?;
 
-    // ── v0.2 statistics ────────────────────────────────
+    Ok(())
+}
 
+fn register_bivariate(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     t.set(
         "covariance",
         lua.create_function(|_, (xs_table, ys_table): (LuaTable, LuaTable)| {
@@ -253,6 +262,10 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         })?,
     )?;
 
+    Ok(())
+}
+
+fn register_transforms(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     t.set(
         "histogram",
         lua.create_function(|lua, (table, bins): (LuaTable, usize)| {
@@ -317,4 +330,117 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mean_impl_basic() {
+        let vals = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert!((mean_impl(&vals) - 3.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn mean_impl_single() {
+        assert!((mean_impl(&[42.0]) - 42.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn variance_impl_sample() {
+        let vals = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        let expected = 4.571428571428571;
+        assert!(
+            (variance_impl(&vals) - expected).abs() < 1e-10,
+            "sample variance mismatch: got {}",
+            variance_impl(&vals)
+        );
+    }
+
+    #[test]
+    fn variance_impl_single_is_zero() {
+        assert!((variance_impl(&[99.0])).abs() < 1e-15);
+    }
+
+    #[test]
+    fn percentile_impl_median() {
+        let sorted = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert!((percentile_impl(&sorted, 50.0) - 3.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn percentile_impl_interpolation() {
+        let sorted = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let q25 = percentile_impl(&sorted, 25.0);
+        assert!(
+            (q25 - 3.25).abs() < 1e-10,
+            "25th percentile should be 3.25, got {q25}"
+        );
+    }
+
+    #[test]
+    fn percentile_impl_single_element() {
+        assert!((percentile_impl(&[42.0], 75.0) - 42.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn histogram_bin_uniform() {
+        let vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let (counts, width) = histogram_bin(&vals, 5, 1.0, 10.0);
+        let total: u64 = counts.iter().sum();
+        assert_eq!(total, 10, "all values must be binned");
+        assert!(
+            (width - 1.8).abs() < 1e-10,
+            "width should be 9/5=1.8, got {width}"
+        );
+    }
+
+    #[test]
+    fn histogram_bin_all_same() {
+        let vals = [5.0, 5.0, 5.0];
+        let (counts, _) = histogram_bin(&vals, 3, 5.0, 5.0);
+        assert_eq!(counts[0], 3, "all values should be in first bin");
+        assert_eq!(counts[1], 0);
+        assert_eq!(counts[2], 0);
+    }
+
+    #[test]
+    fn softmax_impl_sums_to_one() {
+        let vals = [1.0, 2.0, 3.0];
+        let result = softmax_impl(&vals);
+        let sum: f64 = result.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-10,
+            "softmax must sum to 1.0, got {sum}"
+        );
+    }
+
+    #[test]
+    fn softmax_impl_preserves_order() {
+        let vals = [1.0, 2.0, 3.0];
+        let result = softmax_impl(&vals);
+        assert!(
+            result[0] < result[1] && result[1] < result[2],
+            "softmax must preserve ordering"
+        );
+    }
+
+    #[test]
+    fn softmax_impl_numerical_stability() {
+        let vals = [1000.0, 1001.0, 1002.0];
+        let result = softmax_impl(&vals);
+        let sum: f64 = result.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-10,
+            "softmax with large values must still sum to 1.0, got {sum}"
+        );
+    }
+
+    #[test]
+    fn sort_floats_basic() {
+        let mut v = vec![3.0, 1.0, 2.0];
+        sort_floats(&mut v);
+        assert_eq!(v, vec![1.0, 2.0, 3.0]);
+    }
 }
