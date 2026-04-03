@@ -49,15 +49,15 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     // ── PPF (inverse CDF) ────────────────────────────────
 
     t.set(
-        "normal_ppf_params",
+        "normal_inverse_cdf",
         lua.create_function(|_, (p, mu, sigma): (f64, f64, f64)| {
             if !(0.0..=1.0).contains(&p) {
                 return Err(LuaError::runtime(format!(
-                    "normal_ppf_params: p must be in [0, 1], got {p}"
+                    "normal_inverse_cdf: p must be in [0, 1], got {p}"
                 )));
             }
             let dist = Normal::new(mu, sigma)
-                .map_err(|e| LuaError::runtime(format!("normal_ppf_params: {e}")))?;
+                .map_err(|e| LuaError::runtime(format!("normal_inverse_cdf: {e}")))?;
             Ok(dist.inverse_cdf(p))
         })?,
     )?;

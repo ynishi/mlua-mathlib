@@ -621,3 +621,63 @@ fn log_normalize_basic() {
     let ok: bool = lua.load(code).eval().unwrap();
     assert!(ok, "log_normalize should preserve ordering, max near 100");
 }
+
+#[test]
+fn log_normalize_negative_errors() {
+    let lua = setup();
+    let result: LuaResult<LuaTable> = lua.load("return math.log_normalize({1, -2, 3})").eval();
+    assert!(result.is_err(), "negative values should be rejected");
+}
+
+// ── Missing function tests ─────────────────────────────
+
+#[test]
+fn ln_beta_known() {
+    let lua = setup();
+    // ln_beta(1,1) = ln(B(1,1)) = ln(1) = 0
+    let val: f64 = lua.load("return math.ln_beta(1, 1)").eval().unwrap();
+    assert!(val.abs() < 1e-10);
+}
+
+#[test]
+fn regularized_incomplete_gamma_known() {
+    let lua = setup();
+    // regularized_incomplete_gamma(1, 1) = 1 - e^(-1) ≈ 0.6321
+    let val: f64 = lua
+        .load("return math.regularized_incomplete_gamma(1, 1)")
+        .eval()
+        .unwrap();
+    let expected = 1.0 - (-1.0_f64).exp();
+    assert!(
+        (val - expected).abs() < 1e-6,
+        "reg_inc_gamma(1,1) should be ~0.6321, got {val}"
+    );
+}
+
+#[test]
+fn ln_factorial_known() {
+    let lua = setup();
+    // ln_factorial(5) = ln(120) ≈ 4.7875
+    let val: f64 = lua.load("return math.ln_factorial(5)").eval().unwrap();
+    assert!((val - 120.0_f64.ln()).abs() < 1e-10);
+    // ln_factorial(0) = ln(1) = 0
+    let val: f64 = lua.load("return math.ln_factorial(0)").eval().unwrap();
+    assert!(val.abs() < 1e-10);
+}
+
+#[test]
+fn normal_inverse_cdf_known() {
+    let lua = setup();
+    // normal_inverse_cdf(0.5, 0, 1) = 0
+    let val: f64 = lua
+        .load("return math.normal_inverse_cdf(0.5, 0, 1)")
+        .eval()
+        .unwrap();
+    assert!(val.abs() < 1e-10);
+    // normal_inverse_cdf(0.5, 10, 2) = 10 (median = mean)
+    let val: f64 = lua
+        .load("return math.normal_inverse_cdf(0.5, 10, 2)")
+        .eval()
+        .unwrap();
+    assert!((val - 10.0).abs() < 1e-10);
+}

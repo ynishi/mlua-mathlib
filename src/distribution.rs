@@ -14,7 +14,11 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
             |_, (rng, mean, stddev): (LuaUserDataRef<LuaRng>, f64, f64)| {
                 let dist = Normal::new(mean, stddev)
                     .map_err(|e| LuaError::runtime(format!("normal_sample: {e}")))?;
-                Ok(dist.sample(&mut *rng.0.borrow_mut()))
+                let mut r = rng
+                    .0
+                    .try_borrow_mut()
+                    .map_err(|_| LuaError::runtime("normal_sample: RNG is already borrowed"))?;
+                Ok(dist.sample(&mut *r))
             },
         )?,
     )?;
@@ -25,7 +29,11 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
             |_, (rng, alpha, beta): (LuaUserDataRef<LuaRng>, f64, f64)| {
                 let dist = Beta::new(alpha, beta)
                     .map_err(|e| LuaError::runtime(format!("beta_sample: {e}")))?;
-                Ok(dist.sample(&mut *rng.0.borrow_mut()))
+                let mut r = rng
+                    .0
+                    .try_borrow_mut()
+                    .map_err(|_| LuaError::runtime("beta_sample: RNG is already borrowed"))?;
+                Ok(dist.sample(&mut *r))
             },
         )?,
     )?;
@@ -36,7 +44,11 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
             |_, (rng, shape, scale): (LuaUserDataRef<LuaRng>, f64, f64)| {
                 let dist = Gamma::new(shape, scale)
                     .map_err(|e| LuaError::runtime(format!("gamma_sample: {e}")))?;
-                Ok(dist.sample(&mut *rng.0.borrow_mut()))
+                let mut r = rng
+                    .0
+                    .try_borrow_mut()
+                    .map_err(|_| LuaError::runtime("gamma_sample: RNG is already borrowed"))?;
+                Ok(dist.sample(&mut *r))
             },
         )?,
     )?;
@@ -46,7 +58,11 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         lua.create_function(|_, (rng, lambda): (LuaUserDataRef<LuaRng>, f64)| {
             let dist =
                 Exp::new(lambda).map_err(|e| LuaError::runtime(format!("exp_sample: {e}")))?;
-            Ok(dist.sample(&mut *rng.0.borrow_mut()))
+            let mut r = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("exp_sample: RNG is already borrowed"))?;
+            Ok(dist.sample(&mut *r))
         })?,
     )?;
 
@@ -55,8 +71,18 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         lua.create_function(|_, (rng, lambda): (LuaUserDataRef<LuaRng>, f64)| {
             let dist = Poisson::new(lambda)
                 .map_err(|e| LuaError::runtime(format!("poisson_sample: {e}")))?;
-            let val: f64 = dist.sample(&mut *rng.0.borrow_mut());
-            Ok(val.round().max(0.0) as u64)
+            let mut r = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("poisson_sample: RNG is already borrowed"))?;
+            let val: f64 = dist.sample(&mut *r);
+            let rounded = val.round().max(0.0);
+            if rounded > u64::MAX as f64 {
+                return Err(LuaError::runtime(format!(
+                    "poisson_sample: sampled value {val} exceeds u64 range"
+                )));
+            }
+            Ok(rounded as u64)
         })?,
     )?;
 
@@ -65,7 +91,11 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         lua.create_function(|_, (rng, low, high): (LuaUserDataRef<LuaRng>, f64, f64)| {
             let dist = Uniform::new(low, high)
                 .map_err(|e| LuaError::runtime(format!("uniform_sample: {e}")))?;
-            Ok(dist.sample(&mut *rng.0.borrow_mut()))
+            let mut r = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("uniform_sample: RNG is already borrowed"))?;
+            Ok(dist.sample(&mut *r))
         })?,
     )?;
 
@@ -76,7 +106,11 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         lua.create_function(|_, (rng, mu, sigma): (LuaUserDataRef<LuaRng>, f64, f64)| {
             let dist = LogNormal::new(mu, sigma)
                 .map_err(|e| LuaError::runtime(format!("lognormal_sample: {e}")))?;
-            Ok(dist.sample(&mut *rng.0.borrow_mut()))
+            let mut r = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("lognormal_sample: RNG is already borrowed"))?;
+            Ok(dist.sample(&mut *r))
         })?,
     )?;
 
@@ -85,7 +119,11 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         lua.create_function(|_, (rng, n, p): (LuaUserDataRef<LuaRng>, u64, f64)| {
             let dist = Binomial::new(n, p)
                 .map_err(|e| LuaError::runtime(format!("binomial_sample: {e}")))?;
-            let val: u64 = dist.sample(&mut *rng.0.borrow_mut());
+            let mut r = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("binomial_sample: RNG is already borrowed"))?;
+            let val: u64 = dist.sample(&mut *r);
             Ok(val)
         })?,
     )?;
@@ -106,7 +144,10 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                     alphas.push(v);
                 }
                 // Dirichlet via Gamma sampling (dynamic size, no const generics needed)
-                let mut rng_mut = rng.0.borrow_mut();
+                let mut rng_mut = rng
+                    .0
+                    .try_borrow_mut()
+                    .map_err(|_| LuaError::runtime("dirichlet_sample: RNG is already borrowed"))?;
                 let mut samples = Vec::with_capacity(alphas.len());
                 let mut sum = 0.0;
                 for &a in &alphas {
@@ -148,7 +189,10 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                 let dist = WeightedIndex::new(&weights)
                     .map_err(|e| LuaError::runtime(format!("categorical_sample: {e}")))?;
                 // Return 1-based index for Lua convention
-                let idx = dist.sample(&mut *rng.0.borrow_mut()) + 1;
+                let mut r = rng.0.try_borrow_mut().map_err(|_| {
+                    LuaError::runtime("categorical_sample: RNG is already borrowed")
+                })?;
+                let idx = dist.sample(&mut *r) + 1;
                 Ok(idx)
             },
         )?,
@@ -159,7 +203,11 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         lua.create_function(|_, (rng, df): (LuaUserDataRef<LuaRng>, f64)| {
             let dist = StudentT::new(df)
                 .map_err(|e| LuaError::runtime(format!("student_t_sample: {e}")))?;
-            Ok(dist.sample(&mut *rng.0.borrow_mut()))
+            let mut r = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("student_t_sample: RNG is already borrowed"))?;
+            Ok(dist.sample(&mut *r))
         })?,
     )?;
 
@@ -168,7 +216,11 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         lua.create_function(|_, (rng, df): (LuaUserDataRef<LuaRng>, f64)| {
             let dist = ChiSquared::new(df)
                 .map_err(|e| LuaError::runtime(format!("chi_squared_sample: {e}")))?;
-            Ok(dist.sample(&mut *rng.0.borrow_mut()))
+            let mut r = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("chi_squared_sample: RNG is already borrowed"))?;
+            Ok(dist.sample(&mut *r))
         })?,
     )?;
 

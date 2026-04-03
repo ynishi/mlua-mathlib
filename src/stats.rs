@@ -70,18 +70,17 @@ fn percentile_impl(sorted: &[f64], p: f64) -> f64 {
 
 /// Compute histogram bin counts and width.
 fn histogram_bin(values: &[f64], bins: usize, min: f64, max: f64) -> (Vec<u64>, f64) {
-    if (max - min).abs() < f64::EPSILON {
+    let range = max - min;
+    if range <= max.abs() * f64::EPSILON {
         let mut counts = vec![0u64; bins];
         counts[0] = values.len() as u64;
         return (counts, 1.0 / bins as f64);
     }
-    let width = (max - min) / bins as f64;
+    let width = range / bins as f64;
     let mut counts = vec![0u64; bins];
     for &val in values {
-        let mut idx = ((val - min) / width) as usize;
-        if idx >= bins {
-            idx = bins - 1;
-        }
+        let idx = ((val - min) / width) as usize;
+        let idx = idx.min(bins - 1);
         counts[idx] += 1;
     }
     (counts, width)
@@ -205,15 +204,18 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
             if n < 2 {
                 return Err(LuaError::runtime("covariance: need at least 2 values"));
             }
-            let mean_x = mean_impl(&xs);
-            let mean_y = mean_impl(&ys);
-            let cov: f64 = xs
-                .iter()
-                .zip(ys.iter())
-                .map(|(&x, &y)| (x - mean_x) * (y - mean_y))
-                .sum::<f64>()
-                / (n - 1) as f64;
-            Ok(cov)
+            let mut mean_x = 0.0;
+            let mut mean_y = 0.0;
+            let mut co_m = 0.0;
+            for (i, (&x, &y)) in xs.iter().zip(ys.iter()).enumerate() {
+                let k = (i + 1) as f64;
+                let dx = x - mean_x;
+                mean_x += dx / k;
+                let dy = y - mean_y;
+                mean_y += dy / k;
+                co_m += dx * (y - mean_y);
+            }
+            Ok(co_m / (n - 1) as f64)
         })?,
     )?;
 
@@ -297,20 +299,17 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         "log_normalize",
         lua.create_function(|lua, table: LuaTable| {
             let v = table_to_vec(&table)?;
-            let max = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            if max <= 0.0 {
-                return Err(LuaError::runtime(
-                    "log_normalize: all values must be positive (max must be > 0)",
-                ));
+            if let Some((i, &val)) = v.iter().enumerate().find(|(_, &x)| x <= 0.0) {
+                return Err(LuaError::runtime(format!(
+                    "log_normalize: element at index {} is {val} (all values must be > 0)",
+                    i + 1
+                )));
             }
+            let max = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let log_max = (1.0 + max).ln();
             let out = lua.create_table()?;
             for (i, &val) in v.iter().enumerate() {
-                let normalized = if val <= 0.0 {
-                    0.0
-                } else {
-                    (1.0 + val).ln() / log_max * 100.0
-                };
+                let normalized = (1.0 + val).ln() / log_max * 100.0;
                 out.raw_set(i + 1, normalized)?;
             }
             Ok(out)

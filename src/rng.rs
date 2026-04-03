@@ -24,7 +24,11 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     t.set(
         "rng_float",
         lua.create_function(|_, rng: LuaUserDataRef<LuaRng>| {
-            let val: f64 = rng.0.borrow_mut().random();
+            let mut rng_ref = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("rng_float: RNG is already borrowed"))?;
+            let val: f64 = rng_ref.random();
             Ok(val)
         })?,
     )?;
@@ -37,7 +41,11 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                     "rng_int: min ({min}) must be <= max ({max})"
                 )));
             }
-            let val = rng.0.borrow_mut().random_range(min..=max);
+            let mut rng_ref = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("rng_int: RNG is already borrowed"))?;
+            let val = rng_ref.random_range(min..=max);
             Ok(val)
         })?,
     )?;
