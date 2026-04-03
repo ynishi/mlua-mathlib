@@ -20,8 +20,10 @@
 //! "#).exec().unwrap();
 //! ```
 
+mod cdf;
 mod distribution;
 mod rng;
+mod special;
 mod stats;
 
 use mlua::prelude::*;
@@ -33,6 +35,8 @@ pub fn module(lua: &Lua) -> LuaResult<LuaTable> {
     rng::register(lua, &t)?;
     distribution::register(lua, &t)?;
     stats::register(lua, &t)?;
+    special::register(lua, &t)?;
+    cdf::register(lua, &t)?;
 
     Ok(t)
 }

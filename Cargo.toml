@@ -1,6 +1,6 @@
 [package]
 name = "mlua-mathlib"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.77"
 description = "Math library for mlua — RNG, distributions, and descriptive statistics"
@@ -16,6 +16,7 @@ categories = ["mathematics", "api-bindings", "science"]
 mlua = { version = "0.11", features = ["lua54", "vendored"] }
 rand = "0.9"
 rand_distr = "0.5"
+statrs = "0.18"
 
 [dev-dependencies]
 approx = "0.5"
