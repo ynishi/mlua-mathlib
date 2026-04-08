@@ -50,5 +50,63 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         })?,
     )?;
 
+    // shuffle: Fisher-Yates in-place shuffle, returns new table
+    t.set(
+        "shuffle",
+        lua.create_function(|lua, (rng, table): (LuaUserDataRef<LuaRng>, LuaTable)| {
+            let len = table.raw_len();
+            if len == 0 {
+                return lua.create_table();
+            }
+            // Read into vec
+            let mut values: Vec<LuaValue> = Vec::with_capacity(len);
+            for i in 1..=len {
+                values.push(table.raw_get(i)?);
+            }
+            // Fisher-Yates
+            let mut rng_ref = rng
+                .0
+                .try_borrow_mut()
+                .map_err(|_| LuaError::runtime("shuffle: RNG is already borrowed"))?;
+            for i in (1..values.len()).rev() {
+                let j = rng_ref.random_range(0..=i);
+                values.swap(i, j);
+            }
+            let out = lua.create_table()?;
+            for (i, v) in values.into_iter().enumerate() {
+                out.raw_set(i + 1, v)?;
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    // sample_with_replacement: draw n samples with replacement
+    t.set(
+        "sample_with_replacement",
+        lua.create_function(
+            |lua, (rng, table, n): (LuaUserDataRef<LuaRng>, LuaTable, usize)| {
+                let len = table.raw_len();
+                if len == 0 {
+                    return Err(LuaError::runtime(
+                        "sample_with_replacement: input must be non-empty",
+                    ));
+                }
+                if n == 0 {
+                    return lua.create_table();
+                }
+                let mut rng_ref = rng.0.try_borrow_mut().map_err(|_| {
+                    LuaError::runtime("sample_with_replacement: RNG is already borrowed")
+                })?;
+                let out = lua.create_table()?;
+                for i in 0..n {
+                    let idx = rng_ref.random_range(1..=len);
+                    let val: LuaValue = table.raw_get(idx)?;
+                    out.raw_set(i + 1, val)?;
+                }
+                Ok(out)
+            },
+        )?,
+    )?;
+
     Ok(())
 }

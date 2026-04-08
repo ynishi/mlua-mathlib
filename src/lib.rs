@@ -23,6 +23,9 @@
 
 mod cdf;
 mod distribution;
+mod hypothesis;
+mod information;
+mod ranking;
 mod rng;
 mod special;
 mod stats;
@@ -53,6 +56,9 @@ pub fn module(lua: &Lua) -> LuaResult<LuaTable> {
     rng::register(lua, &t)?;
     distribution::register(lua, &t)?;
     stats::register(lua, &t)?;
+    ranking::register(lua, &t)?;
+    hypothesis::register(lua, &t)?;
+    information::register(lua, &t)?;
     special::register(lua, &t)?;
     cdf::register(lua, &t)?;
 

@@ -2,7 +2,7 @@
 
 Math library for [mlua](https://github.com/mlua-rs/mlua) — RNG, distributions, special functions, and descriptive statistics.
 
-Provides math functions that are impractical or numerically unstable to implement in pure Lua: distribution sampling with proper algorithms, independent seeded RNG instances, special functions (erf, gamma, beta), CDF/PPF, and numerically stable statistics.
+Provides math functions that are impractical or numerically unstable to implement in pure Lua: distribution sampling with proper algorithms, independent seeded RNG instances, special functions (erf, gamma, beta), CDF/PPF, hypothesis testing, information theory, ranking metrics, and numerically stable statistics.
 
 ## Features
 
@@ -10,7 +10,10 @@ Provides math functions that are impractical or numerically unstable to implemen
 - **12 distribution samplers** using production-grade algorithms (`rand_distr`)
 - **Special functions** via `statrs` (erf, gamma, beta, digamma, factorial)
 - **CDF/PPF** for Normal, Beta, Gamma, Poisson distributions
-- **12 descriptive statistics** with numerical stability (Welford variance, interpolated percentiles, Wilson CI, stable softmax)
+- **16 descriptive & time-series statistics** with numerical stability (Welford variance, interpolated percentiles, Wilson CI, stable softmax, moving average, EWMA, autocorrelation)
+- **4 hypothesis tests** (Welch's t, Mann-Whitney U, chi-squared, Kolmogorov-Smirnov)
+- **5 ranking & IR metrics** (Spearman, Kendall tau-b, NDCG, MRR, fractional rank)
+- **4 information-theoretic functions** (entropy, KL divergence, JS divergence, cross-entropy)
 
 ## Quick start
 
@@ -46,6 +49,8 @@ All sampling functions take an explicit RNG instance as the first argument. No g
 | `rng_create(seed)` | Create an independent RNG instance (ChaCha12) |
 | `rng_float(rng)` | Sample uniform float in [0, 1) |
 | `rng_int(rng, min, max)` | Sample uniform integer in [min, max] |
+| `shuffle(rng, table)` | Fisher-Yates shuffle (returns new table) |
+| `sample_with_replacement(rng, table, n)` | Draw n samples with replacement |
 
 ### Distribution sampling
 
@@ -79,6 +84,9 @@ All sampling functions take an explicit RNG instance as the first argument. No g
 | `factorial(n)` | Factorial (n <= 170) |
 | `ln_factorial(n)` | Log-factorial |
 | `normal_ppf(p)` | Inverse CDF of N(0,1) |
+| `logsumexp(values)` | Numerically stable log-sum-exp |
+| `logit(p)` | Log-odds: ln(p/(1-p)) |
+| `expit(x)` | Sigmoid / inverse logit (numerically stable) |
 
 ### CDF / PPF / Distribution utilities
 
@@ -111,6 +119,42 @@ All functions take a Lua table (array) of numbers.
 | `histogram(values, bins)` | Histogram binning (returns `{counts, edges}`) |
 | `wilson_ci(successes, total, confidence)` | Wilson score confidence interval (returns `{lower, upper, center}`) |
 | `log_normalize(values)` | Logarithmic normalization to [0, 100] |
+| `moving_average(values, window)` | Simple moving average |
+| `ewma(values, alpha)` | Exponentially weighted moving average |
+| `autocorrelation(values, lag)` | Autocorrelation at given lag |
+| `permutations(n)` | All n! permutations of {1..n} (n ≤ 8, returns table of tables) |
+
+### Hypothesis testing
+
+All tests return a table with test statistic(s) and p-value.
+
+| Function | Description |
+|----------|-------------|
+| `welch_t_test(xs, ys)` | Welch's t-test (unequal variances). Returns `{t_stat, df, p_value}` |
+| `mann_whitney_u(xs, ys [, opts])` | Mann-Whitney U test. Pass `{tie_correction=true}` as 3rd arg to adjust for ties. Returns `{u_stat, z_score, p_value}` |
+| `chi_squared_test(observed, expected)` | Chi-squared goodness-of-fit. Returns `{chi2_stat, df, p_value}` |
+| `ks_test(xs, ys)` | Two-sample Kolmogorov-Smirnov test. Returns `{d_stat, p_value}` |
+
+### Ranking & IR metrics
+
+| Function | Description |
+|----------|-------------|
+| `rank(values)` | Fractional ranks with average tie-breaking (returns table) |
+| `spearman_correlation(xs, ys)` | Spearman rank correlation coefficient |
+| `kendall_tau(xs, ys)` | Kendall's tau-b (handles ties) |
+| `ndcg(relevance, k)` | NDCG@k (linear gain variant: rel/log₂(i+2)) |
+| `mrr(rankings)` | Mean Reciprocal Rank (1-based rank positions) |
+
+### Information theory
+
+Input distributions must be valid probability distributions (non-negative, sum to 1).
+
+| Function | Description |
+|----------|-------------|
+| `entropy(probs)` | Shannon entropy H(p) = -Σ pᵢ ln(pᵢ) |
+| `kl_divergence(p, q)` | KL divergence D_KL(p ‖ q) |
+| `js_divergence(p, q)` | Jensen-Shannon divergence (symmetric, bounded [0, ln 2]) |
+| `cross_entropy(p, q)` | Cross-entropy H(p, q) = -Σ pᵢ ln(qᵢ) |
 
 ## Why not pure Lua?
 
@@ -122,6 +166,8 @@ All functions take a Lua table (array) of numbers.
 | CDF/PPF | Requires special functions as building blocks | Exact implementations via `statrs` |
 | Variance computation | Naive sum-of-squares suffers catastrophic cancellation | Welford's online algorithm |
 | Wilson CI | Hardcoded z=1.96; no inverse normal function | Arbitrary confidence level via `normal_ppf` |
+| Hypothesis tests | Requires CDF tables or lookup; manual formula implementation | Exact p-values via `statrs` distributions |
+| KL/JS divergence | Numerical instability with small probabilities | Proper log-domain computation with validation |
 
 ## Dependencies
 

@@ -681,3 +681,274 @@ fn normal_inverse_cdf_known() {
         .unwrap();
     assert!((val - 10.0).abs() < 1e-10);
 }
+
+// ── v0.3 Ranking ────────────────────────────────────────
+
+#[test]
+fn rank_basic() {
+    let lua = setup();
+    let code = r#"
+        local r = math.rank({3, 1, 2})
+        return r[1] == 3 and r[2] == 1 and r[3] == 2
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "rank should assign 1-based ranks in original order");
+}
+
+#[test]
+fn rank_ties() {
+    let lua = setup();
+    let code = r#"
+        local r = math.rank({3, 1, 3})
+        return r[1] == 2.5 and r[2] == 1 and r[3] == 2.5
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "tied values should get average rank");
+}
+
+#[test]
+fn spearman_perfect_via_lua() {
+    let lua = setup();
+    let val: f64 = lua
+        .load("return math.spearman_correlation({1,2,3,4,5}, {2,4,6,8,10})")
+        .eval()
+        .unwrap();
+    assert!((val - 1.0).abs() < 1e-10);
+}
+
+#[test]
+fn kendall_tau_via_lua() {
+    let lua = setup();
+    let val: f64 = lua
+        .load("return math.kendall_tau({1,2,3}, {3,2,1})")
+        .eval()
+        .unwrap();
+    assert!((val - (-1.0)).abs() < 1e-10);
+}
+
+#[test]
+fn ndcg_perfect_via_lua() {
+    let lua = setup();
+    let val: f64 = lua.load("return math.ndcg({3, 2, 1}, 3)").eval().unwrap();
+    assert!((val - 1.0).abs() < 1e-10);
+}
+
+#[test]
+fn mrr_via_lua() {
+    let lua = setup();
+    let val: f64 = lua.load("return math.mrr({1, 2, 5})").eval().unwrap();
+    let expected = (1.0 + 0.5 + 0.2) / 3.0;
+    assert!((val - expected).abs() < 1e-10);
+}
+
+// ── v0.3 Hypothesis Testing ─────────────────────────────
+
+#[test]
+fn welch_t_test_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local r = math.welch_t_test({1,2,3,4,5}, {100,200,300,400,500})
+        return r.p_value < 0.05 and r.df > 0
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "very different groups should yield significant p-value");
+}
+
+#[test]
+fn mann_whitney_u_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local r = math.mann_whitney_u({1,2,3}, {1,2,3})
+        return r.u_stat >= 0 and r.p_value >= 0 and r.p_value <= 1
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "mann_whitney_u should return valid results");
+}
+
+#[test]
+fn chi_squared_test_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local r = math.chi_squared_test({25,25,25,25}, {25,25,25,25})
+        return r.chi2_stat < 1e-10 and r.df == 3 and r.p_value > 0.99
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "perfect fit should yield chi2≈0, p≈1");
+}
+
+#[test]
+fn ks_test_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local xs = {}; local ys = {}
+        for i = 1, 50 do xs[i] = i; ys[i] = i + 100 end
+        local r = math.ks_test(xs, ys)
+        return r.d_stat > 0.9 and r.p_value >= 0 and r.p_value <= 1
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "completely separated samples should have d≈1");
+}
+
+// ── v0.3 Information Theory ─────────────────────────────
+
+#[test]
+fn entropy_via_lua() {
+    let lua = setup();
+    let val: f64 = lua
+        .load("return math.entropy({0.25, 0.25, 0.25, 0.25})")
+        .eval()
+        .unwrap();
+    let expected = 4.0_f64.ln();
+    assert!((val - expected).abs() < 1e-10);
+}
+
+#[test]
+fn kl_divergence_via_lua() {
+    let lua = setup();
+    let val: f64 = lua
+        .load("return math.kl_divergence({0.5, 0.5}, {0.5, 0.5})")
+        .eval()
+        .unwrap();
+    assert!(val.abs() < 1e-10, "KL(p||p) should be 0");
+}
+
+#[test]
+fn js_divergence_symmetric_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local a = math.js_divergence({0.9, 0.1}, {0.1, 0.9})
+        local b = math.js_divergence({0.1, 0.9}, {0.9, 0.1})
+        local diff = a - b
+        if diff < 0 then diff = -diff end
+        return diff < 1e-10
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "JS divergence should be symmetric");
+}
+
+#[test]
+fn cross_entropy_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local p = {0.25, 0.25, 0.25, 0.25}
+        local ce = math.cross_entropy(p, p)
+        local h = math.entropy(p)
+        local diff = ce - h
+        if diff < 0 then diff = -diff end
+        return diff < 1e-10
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "H(p,p) should equal H(p)");
+}
+
+// ── v0.3 Special (logsumexp, logit, expit) ──────────────
+
+#[test]
+fn logsumexp_via_lua() {
+    let lua = setup();
+    let val: f64 = lua
+        .load("return math.logsumexp({1000, 1001, 1002})")
+        .eval()
+        .unwrap();
+    assert!(
+        val > 1001.0 && val < 1003.0,
+        "logsumexp should be numerically stable"
+    );
+}
+
+#[test]
+fn logit_expit_roundtrip() {
+    let lua = setup();
+    let code = r#"
+        local p = 0.73
+        local x = math.logit(p)
+        local p2 = math.expit(x)
+        local diff = p - p2
+        if diff < 0 then diff = -diff end
+        return diff < 1e-10
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "expit(logit(p)) should equal p");
+}
+
+// ── v0.3 Stats (moving_average, ewma, autocorrelation, permutations, shuffle, sample_with_replacement) ──
+
+#[test]
+fn moving_average_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local ma = math.moving_average({1,2,3,4,5}, 3)
+        return #ma == 3 and ma[1] == 2 and ma[2] == 3 and ma[3] == 4
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "SMA(3) of [1,2,3,4,5] should be [2,3,4]");
+}
+
+#[test]
+fn ewma_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local e = math.ewma({10, 20, 30}, 1.0)
+        return e[1] == 10 and e[2] == 20 and e[3] == 30
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "ewma with alpha=1 should equal raw values");
+}
+
+#[test]
+fn autocorrelation_lag0() {
+    let lua = setup();
+    let val: f64 = lua
+        .load("return math.autocorrelation({1,2,3,4,5}, 0)")
+        .eval()
+        .unwrap();
+    assert!(
+        (val - 1.0).abs() < 1e-10,
+        "autocorrelation at lag 0 should be 1"
+    );
+}
+
+#[test]
+fn permutations_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local p = math.permutations(3)
+        return #p == 6
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "permutations(3) should yield 3! = 6 permutations");
+}
+
+#[test]
+fn shuffle_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local rng = math.rng_create(42)
+        local s = math.shuffle(rng, {1,2,3,4,5})
+        if #s ~= 5 then return false end
+        local sum = 0
+        for _, v in ipairs(s) do sum = sum + v end
+        return sum == 15
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "shuffle should preserve all elements");
+}
+
+#[test]
+fn sample_with_replacement_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local rng = math.rng_create(42)
+        local s = math.sample_with_replacement(rng, {10, 20, 30}, 100)
+        if #s ~= 100 then return false end
+        for _, v in ipairs(s) do
+            if v ~= 10 and v ~= 20 and v ~= 30 then return false end
+        end
+        return true
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(
+        ok,
+        "sample_with_replacement should only return elements from input"
+    );
+}

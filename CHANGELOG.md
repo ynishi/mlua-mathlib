@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-09
+
+### Added
+
+- **Hypothesis testing**: 4 statistical tests
+  - `welch_t_test(xs, ys)` — Welch's t-test (unequal variances)
+  - `mann_whitney_u(xs, ys [, {tie_correction=true}])` — Mann-Whitney U test with optional tie correction
+  - `chi_squared_test(observed, expected)` — Chi-squared goodness-of-fit test
+  - `ks_test(xs, ys)` — Two-sample Kolmogorov-Smirnov test (asymptotic p-value with Stephens correction)
+- **Ranking & IR metrics**: 5 functions
+  - `rank(values)` — Fractional ranks with average tie-breaking
+  - `spearman_correlation(xs, ys)` — Spearman rank correlation
+  - `kendall_tau(xs, ys)` — Kendall's tau-b (handles ties)
+  - `ndcg(relevance, k)` — NDCG@k (linear gain variant)
+  - `mrr(rankings)` — Mean Reciprocal Rank
+- **Information theory**: 4 functions
+  - `entropy(probs)` — Shannon entropy (natural log)
+  - `kl_divergence(p, q)` — KL divergence
+  - `js_divergence(p, q)` — Jensen-Shannon divergence
+  - `cross_entropy(p, q)` — Cross-entropy
+- **Special functions**: 3 additions
+  - `logsumexp(values)` — Numerically stable log-sum-exp
+  - `logit(p)` — Log-odds
+  - `expit(x)` — Sigmoid / inverse logit (numerically stable)
+- **RNG**: 2 additions
+  - `shuffle(rng, table)` — Fisher-Yates shuffle (returns new table)
+  - `sample_with_replacement(rng, table, n)` — Draw n samples with replacement
+- **Time series / combinatorics**: 4 additions
+  - `moving_average(values, window)` — Simple moving average
+  - `ewma(values, alpha)` — Exponentially weighted moving average
+  - `autocorrelation(values, lag)` — Autocorrelation at given lag
+  - `permutations(n)` — All n! permutations via Heap's algorithm (n ≤ 8)
+
 ## [0.2.0] - 2026-04-04
 
 ### Added
@@ -63,5 +96,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `iqr(values)` — interquartile range
   - `softmax(values)` — numerically stable softmax
 
+[0.3.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.1.0

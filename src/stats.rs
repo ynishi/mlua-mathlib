@@ -3,7 +3,7 @@ use statrs::distribution::{ContinuousCDF, Normal};
 
 /// Extract a `Vec<f64>` from a Lua table (sequence).
 /// Rejects NaN and Infinity values to ensure deterministic behavior.
-fn table_to_vec(table: &LuaTable) -> LuaResult<Vec<f64>> {
+pub(crate) fn table_to_vec(table: &LuaTable) -> LuaResult<Vec<f64>> {
     let len = table.raw_len();
     if len == 0 {
         return Err(LuaError::runtime("expected non-empty array"));
@@ -22,18 +22,18 @@ fn table_to_vec(table: &LuaTable) -> LuaResult<Vec<f64>> {
 }
 
 /// Sort helper using total_cmp (NaN-safe, deterministic).
-fn sort_floats(v: &mut [f64]) {
+pub(crate) fn sort_floats(v: &mut [f64]) {
     v.sort_by(|a, b| a.total_cmp(b));
 }
 
 /// Arithmetic mean.
-fn mean_impl(values: &[f64]) -> f64 {
+pub(crate) fn mean_impl(values: &[f64]) -> f64 {
     let n = values.len() as f64;
     values.iter().sum::<f64>() / n
 }
 
 /// Variance using Welford's online algorithm (numerically stable).
-fn variance_impl(values: &[f64]) -> f64 {
+pub(crate) fn variance_impl(values: &[f64]) -> f64 {
     let n = values.len();
     if n < 2 {
         return 0.0;
@@ -73,6 +73,7 @@ fn histogram_bin(values: &[f64], bins: usize, min: f64, max: f64) -> (Vec<u64>, 
     let range = max - min;
     if range <= max.abs() * f64::EPSILON {
         let mut counts = vec![0u64; bins];
+        // On 64-bit platforms usize→u64 is infallible; u64::MAX is a safe fallback for 128-bit.
         counts[0] = u64::try_from(values.len()).unwrap_or(u64::MAX);
         return (counts, 1.0 / bins as f64);
     }
@@ -119,6 +120,8 @@ fn softmax_impl(values: &[f64]) -> Vec<f64> {
 pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     register_descriptive(lua, t)?;
     register_bivariate(lua, t)?;
+    register_timeseries(lua, t)?;
+    register_combinatorics(lua, t)?;
     register_transforms(lua, t)?;
     Ok(())
 }
@@ -259,6 +262,136 @@ fn register_bivariate(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                 return Err(LuaError::runtime("correlation: zero variance"));
             }
             Ok(cov / denom)
+        })?,
+    )?;
+
+    Ok(())
+}
+
+fn register_timeseries(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
+    // moving_average: simple moving average with given window size
+    t.set(
+        "moving_average",
+        lua.create_function(|lua, (table, window): (LuaTable, usize)| {
+            let v = table_to_vec(&table)?;
+            if window == 0 || window > v.len() {
+                return Err(LuaError::runtime(format!(
+                    "moving_average: window must be in [1, {}], got {window}",
+                    v.len()
+                )));
+            }
+            let out = lua.create_table()?;
+            let mut sum: f64 = v[..window].iter().sum();
+            out.raw_set(1, sum / window as f64)?;
+            for i in window..v.len() {
+                sum += v[i] - v[i - window];
+                out.raw_set(i - window + 2, sum / window as f64)?;
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    // ewma: exponentially weighted moving average
+    t.set(
+        "ewma",
+        lua.create_function(|lua, (table, alpha): (LuaTable, f64)| {
+            if !(0.0..=1.0).contains(&alpha) {
+                return Err(LuaError::runtime(format!(
+                    "ewma: alpha must be in [0, 1], got {alpha}"
+                )));
+            }
+            let v = table_to_vec(&table)?;
+            let out = lua.create_table()?;
+            // Safety: v is non-empty (table_to_vec rejects empty arrays).
+            let mut ewma = v[0];
+            out.raw_set(1, ewma)?;
+            for (i, &val) in v.iter().enumerate().skip(1) {
+                ewma = alpha * val + (1.0 - alpha) * ewma;
+                out.raw_set(i + 1, ewma)?;
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    // autocorrelation at given lag
+    t.set(
+        "autocorrelation",
+        lua.create_function(|_, (table, lag): (LuaTable, usize)| {
+            let v = table_to_vec(&table)?;
+            if lag == 0 {
+                return Ok(1.0);
+            }
+            if lag >= v.len() {
+                return Err(LuaError::runtime(format!(
+                    "autocorrelation: lag must be < array length ({}), got {lag}",
+                    v.len()
+                )));
+            }
+            let mean = mean_impl(&v);
+            let var: f64 = v.iter().map(|&x| (x - mean) * (x - mean)).sum();
+            if var == 0.0 {
+                return Err(LuaError::runtime("autocorrelation: zero variance"));
+            }
+            let cov: f64 = v[..v.len() - lag]
+                .iter()
+                .zip(v[lag..].iter())
+                .map(|(&x, &y)| (x - mean) * (y - mean))
+                .sum();
+            Ok(cov / var)
+        })?,
+    )?;
+
+    Ok(())
+}
+
+fn register_combinatorics(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
+    // permutations: generate all n! permutations of {1, ..., n}
+    t.set(
+        "permutations",
+        lua.create_function(|lua, n: usize| {
+            if n == 0 {
+                return Err(LuaError::runtime("permutations: n must be >= 1"));
+            }
+            if n > 8 {
+                return Err(LuaError::runtime(
+                    "permutations: n > 8 not supported (8! = 40320)",
+                ));
+            }
+
+            let mut arr: Vec<usize> = (1..=n).collect();
+            let mut result: Vec<Vec<usize>> = Vec::new();
+
+            // Heap's algorithm (iterative)
+            let mut c = vec![0usize; n];
+            result.push(arr.clone());
+
+            let mut i = 0;
+            while i < n {
+                if c[i] < i {
+                    if i % 2 == 0 {
+                        arr.swap(0, i);
+                    } else {
+                        arr.swap(c[i], i);
+                    }
+                    result.push(arr.clone());
+                    c[i] += 1;
+                    i = 0;
+                } else {
+                    c[i] = 0;
+                    i += 1;
+                }
+            }
+
+            // Convert to Lua table of tables
+            let out = lua.create_table()?;
+            for (idx, perm) in result.iter().enumerate() {
+                let row = lua.create_table()?;
+                for (j, &val) in perm.iter().enumerate() {
+                    row.raw_set(j + 1, val)?;
+                }
+                out.raw_set(idx + 1, row)?;
+            }
+            Ok(out)
         })?,
     )?;
 

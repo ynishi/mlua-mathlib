@@ -57,6 +57,48 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         lua.create_function(|_, n: u64| Ok(factorial_fn::ln_factorial(n)))?,
     )?;
 
+    // logsumexp: numerically stable log(Σ exp(x_i))
+    t.set(
+        "logsumexp",
+        lua.create_function(|_, table: LuaTable| {
+            let v = crate::stats::table_to_vec(&table)?;
+            let max = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            if max.is_infinite() {
+                return Ok(f64::NEG_INFINITY);
+            }
+            let sum: f64 = v.iter().map(|&x| (x - max).exp()).sum();
+            Ok(max + sum.ln())
+        })?,
+    )?;
+
+    // logit: log(p / (1-p))
+    t.set(
+        "logit",
+        lua.create_function(|_, p: f64| {
+            if p <= 0.0 || p >= 1.0 {
+                return Err(LuaError::runtime(format!(
+                    "logit: p must be in (0, 1), got {p}"
+                )));
+            }
+            Ok((p / (1.0 - p)).ln())
+        })?,
+    )?;
+
+    // expit (sigmoid): 1 / (1 + exp(-x))
+    t.set(
+        "expit",
+        lua.create_function(|_, x: f64| {
+            // Numerically stable sigmoid
+            if x >= 0.0 {
+                let ez = (-x).exp();
+                Ok(1.0 / (1.0 + ez))
+            } else {
+                let ez = x.exp();
+                Ok(ez / (1.0 + ez))
+            }
+        })?,
+    )?;
+
     // normal_ppf: inverse CDF of N(0,1)
     t.set(
         "normal_ppf",
