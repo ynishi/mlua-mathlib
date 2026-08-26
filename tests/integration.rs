@@ -841,6 +841,69 @@ fn cross_entropy_via_lua() {
     assert!(ok, "H(p,p) should equal H(p)");
 }
 
+#[test]
+fn tvd_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local same = math.tvd({0.25, 0.25, 0.5}, {0.25, 0.25, 0.5})
+        local disjoint = math.tvd({1.0, 0.0}, {0.0, 1.0})
+        return same < 1e-10 and disjoint > 1.0 - 1e-10
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(
+        ok,
+        "TVD should be 0 on identical and 1 on disjoint supports"
+    );
+}
+
+#[test]
+fn off_support_divergence_is_huge_via_lua() {
+    let lua = setup();
+    // `setup` replaces the stdlib `math` table, so `math.huge` is not in scope.
+    let code = r#"
+        local inf = 1 / 0
+        local kl = math.kl_divergence({0.5, 0.5}, {1.0, 0.0})
+        local ce = math.cross_entropy({0.5, 0.5}, {1.0, 0.0})
+        return kl == inf and ce == inf
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "a support gap should read as infinity, not raise");
+}
+
+#[test]
+fn long_distribution_tolerates_f32_drift_via_lua() {
+    let lua = setup();
+    // 5e-5 is the drift an f32-normalized 50257-entry softmax carries; the old
+    // fixed 1e-6 rejected it.
+    let code = r#"
+        local n = 50257
+        local p = {}
+        local each = 1.0 / n
+        for i = 1, n do p[i] = each end
+        p[1] = p[1] + 5e-5
+        return math.entropy(p)
+    "#;
+    let h: f64 = lua.load(code).eval().unwrap();
+    assert!(
+        h > 0.0,
+        "a drifted long distribution should still be scored"
+    );
+}
+
+#[test]
+fn error_names_the_offending_element_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local ok, err = pcall(math.entropy, {0.5, -0.1, 0.6})
+        return tostring(err)
+    "#;
+    let err: String = lua.load(code).eval().unwrap();
+    assert!(
+        err.contains("probs[1] is negative"),
+        "error should name the element, got: {err}"
+    );
+}
+
 // ── v0.3 Special (logsumexp, logit, expit) ──────────────
 
 #[test]

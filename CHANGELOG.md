@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Information theory**: 1 function
+  - `tvd(p, q)` — Total variation distance (`0.5 * Σ|p_i - q_i|`), symmetric and bounded `[0, 1]`
+
+### Changed
+
+- **Normalization tolerance is now length-dependent** across `entropy`, `kl_divergence`, `js_divergence`, `cross_entropy` and `tvd`. The former fixed `1e-6` rejected valid distributions that a caller had normalized in f32: 197 of 200 trials at length 4096, and 200 of 200 at length 32000. The bound is now `max(1e-6, (n-1) * 5.96e-8)` — the forward error of naive f32 summation — so short vectors behave as before and long ones are admitted.
+- **`kl_divergence` and `cross_entropy` return infinity where the supports do not overlap** (`q_i = 0` while `p_i > 0`) instead of raising. The definition is genuinely infinite there, and raising stopped callers that sweep a sequence of distributions.
+- **Errors name the offending element**: `probs[1] is negative: -0.1` in place of `probabilities must be non-negative`, and `p`/`q` are distinguished for pairwise calls. Non-finite entries (`NaN` / `inf`) are now reported as such rather than surfacing as a failed sum check, and an empty distribution is refused explicitly.
+
 ## [0.3.0] - 2026-04-09
 
 ### Added

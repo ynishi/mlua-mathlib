@@ -13,7 +13,7 @@ Provides math functions that are impractical or numerically unstable to implemen
 - **16 descriptive & time-series statistics** with numerical stability (Welford variance, interpolated percentiles, Wilson CI, stable softmax, moving average, EWMA, autocorrelation)
 - **4 hypothesis tests** (Welch's t, Mann-Whitney U, chi-squared, Kolmogorov-Smirnov)
 - **5 ranking & IR metrics** (Spearman, Kendall tau-b, NDCG, MRR, fractional rank)
-- **4 information-theoretic functions** (entropy, KL divergence, JS divergence, cross-entropy)
+- **5 information-theoretic functions** (entropy, KL divergence, JS divergence, cross-entropy, total variation distance)
 
 ## Quick start
 
@@ -155,6 +155,14 @@ Input distributions must be valid probability distributions (non-negative, sum t
 | `kl_divergence(p, q)` | KL divergence D_KL(p ‖ q) |
 | `js_divergence(p, q)` | Jensen-Shannon divergence (symmetric, bounded [0, ln 2]) |
 | `cross_entropy(p, q)` | Cross-entropy H(p, q) = -Σ pᵢ ln(qᵢ) |
+| `tvd(p, q)` | Total variation distance 0.5 Σ\|pᵢ - qᵢ\| (symmetric, bounded [0, 1]) |
+
+The sum check tolerates `max(1e-6, (n-1) × 5.96e-8)`, which is the drift a
+distribution normalized in f32 carries once widened to f64 — a 50257-entry
+softmax lands around `1.3e-4`. `kl_divergence` and `cross_entropy` return
+infinity where `qᵢ = 0` while `pᵢ > 0` rather than raising, since the
+definition is infinite there. Errors name the element that failed
+(`p[3] is negative: -0.1`).
 
 ## Why not pure Lua?
 
