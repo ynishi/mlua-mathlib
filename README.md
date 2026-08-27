@@ -157,12 +157,14 @@ Input distributions must be valid probability distributions (non-negative, sum t
 | `cross_entropy(p, q)` | Cross-entropy H(p, q) = -Σ pᵢ ln(qᵢ) |
 | `tvd(p, q)` | Total variation distance 0.5 Σ\|pᵢ - qᵢ\| (symmetric, bounded [0, 1]) |
 
-The sum check tolerates `max(1e-6, (n-1) × 5.96e-8)`, which is the drift a
+The sum check tolerates `32 × sqrt(n) × 5.96e-8`, which covers the drift a
 distribution normalized in f32 carries once widened to f64 — a 50257-entry
-softmax lands around `1.3e-4`. `kl_divergence` and `cross_entropy` return
-infinity where `qᵢ = 0` while `pᵢ > 0` rather than raising, since the
-definition is infinite there. Errors name the element that failed
-(`p[3] is negative: -0.1`).
+softmax lands around `1.2e-4`. Since a sum of `1 ± tol` is accepted, `tvd` can
+return marginally more than 1 when both inputs drift upward, and `js_divergence`
+marginally more than ln 2. `kl_divergence` and `cross_entropy` return `math.huge`
+where `qᵢ = 0` while `pᵢ > 0` rather than raising, since the definition is
+infinite there. Errors name the element that failed, 1-based as in the Lua table
+(`p[3] is negative: -0.1` for a pairwise call, `probs[3] ...` for `entropy`).
 
 ## Why not pure Lua?
 

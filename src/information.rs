@@ -5,31 +5,48 @@ use crate::stats::table_to_vec;
 /// Unit roundoff of `f32`: half an ulp at 1.0.
 const F32_UNIT_ROUNDOFF: f64 = 5.960_464_477_539_063e-8;
 
-/// Tolerance floor, kept so short distributions behave as they always have.
-const TOL_FLOOR: f64 = 1e-6;
+/// Safety factor over the statistical growth of the rounding error.
+const TOL_SLACK: f64 = 32.0;
 
 /// Absolute tolerance for the "sums to 1" check on a distribution of `n` elements.
 ///
-/// Naive summation of `n` floats carries a forward error bound of
-/// `(n-1) * u * Σ|x_i|`; with `Σ|x_i| = 1` and `u` the f32 unit roundoff that is
-/// `(n-1) * 5.96e-8`. Callers normalize in f32 (a softmax output) and widen to
-/// f64, so the check has to admit that drift — a 50257-entry vocabulary reaches
-/// `1.3e-4` in practice, well past the `1e-6` this used to compare against.
+/// Callers normalize in f32 (a softmax output) and widen to f64, so the check
+/// has to admit the drift that carries: `1.2e-5` at `n = 4096` and `1.2e-4` at
+/// `n = 50257`, against the `1e-6` this used to compare against.
+///
+/// The bound grows like `√n * u` (`u` = f32 unit roundoff) because the per-term
+/// rounding errors cancel rather than accumulate. The deterministic worst case
+/// `(n-1) * u` is ~26x looser than anything observed, and at a 50257-entry
+/// vocabulary it would let 0.3% of the mass go missing unnoticed — a top-k mask
+/// that forgets to renormalize lands exactly there. [`TOL_SLACK`] keeps a factor
+/// of ~4 over the observed maximum while holding that leak to 0.04%.
+///
+/// One consequence: at short lengths this is looser than the fixed `1e-6` it
+/// replaced (`1.9e-6` at `n = 1`, `3.8e-6` at `n = 4`). A floor would be dead
+/// weight — `√n` growth passes `1e-6` before `n` reaches 1 — so the bound is a
+/// single expression rather than a floor that never applies.
 fn norm_tol(n: usize) -> f64 {
-    TOL_FLOOR.max(n.saturating_sub(1) as f64 * F32_UNIT_ROUNDOFF)
+    TOL_SLACK * (n as f64).sqrt() * F32_UNIT_ROUNDOFF
 }
 
 /// Why a slice is not a probability distribution.
 ///
 /// Each variant names the offending side and index so the caller can find the
-/// row rather than re-deriving it from a failed sum.
+/// element rather than re-deriving it from a failed sum. Indices are **1-based**,
+/// matching the Lua tables these come from and the diagnostics in
+/// [`crate::stats::table_to_vec`].
 #[derive(Debug, PartialEq)]
 enum DistError {
     /// Zero-length input: probability over an empty support is undefined.
+    ///
+    /// Unreachable from Lua — `table_to_vec` refuses an empty table first. Kept
+    /// as the internal contract for the `_impl` functions.
     Empty { side: &'static str },
     /// A pairwise call received two distributions over different supports.
     LengthMismatch { p: usize, q: usize },
     /// An element was `NaN` or `±inf`.
+    ///
+    /// Unreachable from Lua for the same reason as [`Self::Empty`].
     NonFinite {
         side: &'static str,
         index: usize,
@@ -78,7 +95,9 @@ fn validate(dist: &[f64], side: &'static str) -> Result<(), DistError> {
         return Err(DistError::Empty { side });
     }
     let mut sum = 0.0;
-    for (index, &value) in dist.iter().enumerate() {
+    for (i, &value) in dist.iter().enumerate() {
+        // 1-based: these indices are quoted back to Lua, where the table starts at 1.
+        let index = i + 1;
         if !value.is_finite() {
             return Err(DistError::NonFinite { side, index, value });
         }
@@ -169,8 +188,10 @@ fn cross_entropy_impl(p: &[f64], q: &[f64]) -> Result<f64, DistError> {
 }
 
 /// Total variation distance: TVD(p, q) = 0.5 * Σ|p_i - q_i|
-/// Symmetric and bounded [0, 1]: the share of probability mass the two
-/// distributions disagree on.
+/// Symmetric: the share of probability mass the two distributions disagree on.
+/// Bounded [0, 1] for exactly normalized inputs; since [`validate`] admits a sum
+/// of `1 ± norm_tol(n)`, a caller feeding two drifted distributions can see up to
+/// `1 + norm_tol(n)` back.
 fn tvd_impl(p: &[f64], q: &[f64]) -> Result<f64, DistError> {
     validate_pair(p, q)?;
     let l1: f64 = p.iter().zip(q.iter()).map(|(&a, &b)| (a - b).abs()).sum();
@@ -333,7 +354,7 @@ mod tests {
             let p = f32_normalized(n);
             let drift = (p.iter().sum::<f64>() - 1.0).abs();
             assert!(
-                drift > TOL_FLOOR,
+                drift > 1e-6,
                 "length {n} should drift past the old fixed tolerance, got {drift:e}"
             );
             entropy_impl(&p).unwrap_or_else(|e| panic!("length {n} rejected: {e}"));
@@ -341,34 +362,63 @@ mod tests {
     }
 
     #[test]
-    fn tolerance_still_catches_a_missing_renormalization() {
-        // Masking out 5% of the mass and forgetting to renormalize stays an error
-        // at every length.
-        for n in [4usize, 4096, 50257] {
-            let scaled: Vec<f64> = f32_normalized(n).iter().map(|x| x * 0.95).collect();
-            assert!(entropy_impl(&scaled).is_err(), "length {n} slipped through");
+    fn tolerance_is_tight_on_both_sides() {
+        // What pins the bound: a sum short by twice the tolerance must fail and
+        // one short by half of it must pass. A 5%-off distribution would be
+        // caught by any tolerance and proves nothing about this one.
+        for n in [4usize, 256, 4096, 50257] {
+            let tol = norm_tol(n);
+            let each = 1.0 / n as f64;
+            // Scaling the whole vector is the shape a forgotten renormalization
+            // takes; subtracting from one element goes negative once the
+            // tolerance exceeds 1/n.
+            let short_by = |missing: f64| -> Vec<f64> { vec![each * (1.0 - missing); n] };
+
+            entropy_impl(&short_by(tol * 0.5))
+                .unwrap_or_else(|e| panic!("n={n}: inside tol rejected: {e}"));
+
+            assert!(
+                entropy_impl(&short_by(tol * 2.0)).is_err(),
+                "n={n}: a sum short by 2x the tolerance slipped through"
+            );
         }
     }
 
     #[test]
-    fn tolerance_floor_holds_for_short_vectors() {
-        assert_eq!(norm_tol(1), TOL_FLOOR);
-        assert_eq!(norm_tol(2), TOL_FLOOR);
-        assert!(norm_tol(50257) > 1e-3);
+    fn tolerance_scales_with_sqrt_of_length() {
+        // Quadrupling the length doubles the bound.
+        assert!((norm_tol(1024) / norm_tol(256) - 2.0).abs() < 1e-9);
+        // And it stays far from letting a tenth of a percent go missing.
+        assert!(norm_tol(50257) < 5e-4, "got {:e}", norm_tol(50257));
+    }
+
+    #[test]
+    fn tvd_exceeds_one_when_both_inputs_drift() {
+        // Documented consequence of admitting a sum of 1 ± tol: two one-hots that
+        // each drift upward disagree on slightly more than the whole mass.
+        let n = 4096;
+        let tol = norm_tol(n);
+        let mut p = vec![0.0; n];
+        let mut q = vec![0.0; n];
+        p[0] = 1.0 + tol * 0.5;
+        q[1] = 1.0 + tol * 0.5;
+        let v = tvd_impl(&p, &q).unwrap();
+        assert!(v > 1.0 && v <= 1.0 + tol, "expected just above 1, got {v}");
     }
 
     #[test]
     fn error_names_the_offending_element() {
+        // Index is 1-based: -0.1 is the second element of the Lua table.
         let err = entropy_impl(&[0.5, -0.1, 0.6]).unwrap_err();
         assert_eq!(
             err,
             DistError::Negative {
                 side: "probs",
-                index: 1,
+                index: 2,
                 value: -0.1
             }
         );
-        assert_eq!(err.to_string(), "probs[1] is negative: -0.1");
+        assert_eq!(err.to_string(), "probs[2] is negative: -0.1");
     }
 
     #[test]
@@ -378,7 +428,7 @@ mod tests {
             err,
             DistError::NonFinite {
                 side: "probs",
-                index: 1,
+                index: 2,
                 ..
             }
         ));

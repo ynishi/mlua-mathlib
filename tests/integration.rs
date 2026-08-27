@@ -873,14 +873,15 @@ fn off_support_divergence_is_huge_via_lua() {
 #[test]
 fn long_distribution_tolerates_f32_drift_via_lua() {
     let lua = setup();
-    // 5e-5 is the drift an f32-normalized 50257-entry softmax carries; the old
-    // fixed 1e-6 rejected it.
+    // 1.2e-4 is the drift an f32-normalized 50257-entry softmax carries; the old
+    // fixed 1e-6 rejected it. Added by hand here — Lua numbers are f64, so the
+    // f32 rounding that produces it cannot be reproduced from this side.
     let code = r#"
         local n = 50257
         local p = {}
         local each = 1.0 / n
         for i = 1, n do p[i] = each end
-        p[1] = p[1] + 5e-5
+        p[1] = p[1] + 1.2e-4
         return math.entropy(p)
     "#;
     let h: f64 = lua.load(code).eval().unwrap();
@@ -898,8 +899,9 @@ fn error_names_the_offending_element_via_lua() {
         return tostring(err)
     "#;
     let err: String = lua.load(code).eval().unwrap();
+    // 1-based, matching the Lua table: -0.1 is probs[2], not probs[1].
     assert!(
-        err.contains("probs[1] is negative"),
+        err.contains("probs[2] is negative"),
         "error should name the element, got: {err}"
     );
 }
