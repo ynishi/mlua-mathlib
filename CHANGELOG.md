@@ -9,8 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.4.0] - 2026-08-28
+
+### Added
+
 - **Information theory**: 1 function
-  - `tvd(p, q)` — Total variation distance (`0.5 * Σ|p_i - q_i|`), symmetric and bounded `[0, 1]`
+  - `tvd(p, q)` — Total variation distance (`0.5 * Σ|p_i - q_i|`), symmetric and bounded `[0, 1]` for exactly normalized inputs (up to `1 + tol` when both inputs carry the drift the sum check admits)
 
 ### Changed
 
