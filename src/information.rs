@@ -44,6 +44,14 @@ enum DistError {
     Empty { side: &'static str },
     /// A pairwise call received two distributions over different supports.
     LengthMismatch { p: usize, q: usize },
+    /// A joint distribution matrix had a row of the wrong width. Named
+    /// separately from [`Self::LengthMismatch`] so the row can be pointed at —
+    /// `p` / `q` are the pairwise vocabulary and say nothing here.
+    RaggedRow {
+        row: usize,
+        expected: usize,
+        found: usize,
+    },
     /// An element was `NaN` or `±inf`.
     ///
     /// Unreachable from Lua for the same reason as [`Self::Empty`].
@@ -72,6 +80,16 @@ impl std::fmt::Display for DistError {
             Self::Empty { side } => write!(f, "{side} is empty"),
             Self::LengthMismatch { p, q } => {
                 write!(f, "length mismatch: p has {p}, q has {q}")
+            }
+            Self::RaggedRow {
+                row,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "joint[{row}] has {found} columns, expected {expected} to match joint[1]"
+                )
             }
             Self::NonFinite { side, index, value } => {
                 write!(f, "{side}[{index}] is not finite: {value}")
@@ -212,9 +230,10 @@ fn mutual_information_impl(joint: &[Vec<f64>]) -> Result<f64, DistError> {
     }
     for (i, row) in joint.iter().enumerate() {
         if row.len() != cols {
-            return Err(DistError::LengthMismatch {
-                p: cols,
-                q: row.len(),
+            return Err(DistError::RaggedRow {
+                row: i + 1,
+                expected: cols,
+                found: row.len(),
             });
         }
         for (j, &v) in row.iter().enumerate() {
@@ -246,17 +265,24 @@ fn mutual_information_impl(joint: &[Vec<f64>]) -> Result<f64, DistError> {
         });
     }
 
-    let row_marginals: Vec<f64> = joint.iter().map(|r| r.iter().sum()).collect();
+    // Divide through by the observed sum rather than trusting it to be 1.
+    // A joint summing to `S` would otherwise yield `S·I - S·ln S ≈ I - (S-1)`,
+    // biasing the result by up to the tolerance itself — and in one direction:
+    // a sum below 1 reports a positive mutual information for variables that
+    // are exactly independent. The tolerance admits drift by design (callers
+    // normalize in f32), so that is the common case, not the rare one.
+    let row_marginals: Vec<f64> = joint.iter().map(|r| r.iter().sum::<f64>() / sum).collect();
     let col_marginals: Vec<f64> = (0..cols)
-        .map(|j| joint.iter().map(|r| r[j]).sum())
+        .map(|j| joint.iter().map(|r| r[j]).sum::<f64>() / sum)
         .collect();
 
     let mut acc = 0.0;
     for (i, row) in joint.iter().enumerate() {
         for (j, &p_xy) in row.iter().enumerate() {
             if p_xy > 0.0 {
-                // Both marginals are >= p_xy > 0 here, so neither divides by zero.
-                acc += p_xy * (p_xy / (row_marginals[i] * col_marginals[j])).ln();
+                let p = p_xy / sum;
+                // Both marginals are >= p > 0 here, so neither divides by zero.
+                acc += p * (p / (row_marginals[i] * col_marginals[j])).ln();
             }
         }
     }
@@ -467,6 +493,66 @@ mod tests {
     }
 
     #[test]
+    fn mutual_information_is_unbiased_by_a_drifted_sum() {
+        // An independent joint whose sum sits at the edge of the tolerance.
+        // Without dividing through by the observed sum, the result would carry
+        // a bias of roughly (1 - sum) — positive mutual information for
+        // variables that are exactly independent.
+        for cells in [4usize, 4096, 50176] {
+            let rows = if cells == 4 { 2 } else { 64 };
+            let cols = cells / rows;
+            let tol = norm_tol(cells);
+            // What remains is f64 accumulation over the cells, not the
+            // normalization bias — which reached 2.1e-4 here before the sum
+            // was divided out.
+            let bound = 16.0 * cells as f64 * f64::EPSILON;
+            for direction in [-0.5, 0.5] {
+                let each = (1.0 + direction * tol) / cells as f64;
+                let joint: Vec<Vec<f64>> = (0..rows).map(|_| vec![each; cols]).collect();
+                let mi = mutual_information_impl(&joint).unwrap();
+                assert!(
+                    mi < bound,
+                    "cells={cells} direction={direction}: independent joint reported \
+                     mi={mi:e}, bound {bound:e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mutual_information_of_a_degenerate_shape_is_zero() {
+        // A single row or column means one variable is constant, so it carries
+        // no information about the other.
+        assert!(
+            mutual_information_impl(&[vec![0.25, 0.25, 0.5]])
+                .unwrap()
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            mutual_information_impl(&[vec![0.25], vec![0.25], vec![0.5]])
+                .unwrap()
+                .abs()
+                < 1e-12
+        );
+        // 1x1: the whole mass in one cell.
+        assert!(mutual_information_impl(&[vec![1.0]]).unwrap().abs() < 1e-12);
+    }
+
+    #[test]
+    fn mutual_information_tolerates_an_all_zero_row_or_column() {
+        // An outcome that never occurs has a zero marginal, which would divide
+        // by zero if its cells were not already skipped as zero.
+        let zero_row = vec![vec![0.5, 0.5], vec![0.0, 0.0]];
+        let mi_row = mutual_information_impl(&zero_row).unwrap();
+        assert!(mi_row.is_finite() && mi_row.abs() < 1e-12, "got {mi_row}");
+
+        let zero_col = vec![vec![0.5, 0.0], vec![0.5, 0.0]];
+        let mi_col = mutual_information_impl(&zero_col).unwrap();
+        assert!(mi_col.is_finite() && mi_col.abs() < 1e-12, "got {mi_col}");
+    }
+
+    #[test]
     fn mutual_information_is_symmetric_under_transpose() {
         let joint = vec![vec![0.1, 0.2, 0.05], vec![0.15, 0.3, 0.2]];
         let transposed: Vec<Vec<f64>> = (0..3)
@@ -480,10 +566,20 @@ mod tests {
     #[test]
     fn mutual_information_rejects_a_ragged_or_unnormalized_matrix() {
         let ragged = vec![vec![0.5, 0.5], vec![0.0]];
-        assert!(matches!(
-            mutual_information_impl(&ragged).unwrap_err(),
-            DistError::LengthMismatch { .. }
-        ));
+        let err = mutual_information_impl(&ragged).unwrap_err();
+        assert_eq!(
+            err,
+            DistError::RaggedRow {
+                row: 2,
+                expected: 2,
+                found: 1
+            }
+        );
+        // The row is named, 1-based, as everything else in this module is.
+        assert_eq!(
+            err.to_string(),
+            "joint[2] has 1 columns, expected 2 to match joint[1]"
+        );
         let short = vec![vec![0.2, 0.2], vec![0.2, 0.2]];
         assert!(matches!(
             mutual_information_impl(&short).unwrap_err(),

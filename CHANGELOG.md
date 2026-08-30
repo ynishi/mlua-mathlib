@@ -17,9 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Hypothesis testing**: 1 function
   - `permutation_test(xs, ys, draws, seed [, {alternative = "two_sided" | "greater" | "less"}])` — shuffles the pooled observations and counts how often the reshuffled difference in means is at least as extreme as the observed one. Where the other tests assume a shape (normality for Welch's t, continuity for Mann-Whitney and Kolmogorov-Smirnov), this assumes only that the labels are exchangeable under the null. Returns `{observed, p_value, extreme_draws, draws}`
 
-  The p-value is `(1 + extreme) / (1 + draws)`, not `extreme / draws`: the observed arrangement is itself one of the permutations under the null, and counting it keeps the estimate from reaching exactly zero — a claim no finite number of draws can support.
+  The p-value is `(1 + extreme) / (1 + draws)`, not `extreme / draws`: the observed arrangement is itself one of the permutations under the null, and counting it keeps the estimate from reaching exactly zero — a claim no finite number of draws can support. Ties are counted with a tolerance scaled to the length and magnitude being summed, since `observed` and each permuted statistic are summed in different orders and differ by ulps; an exact comparison would drop genuine ties and understate the p-value. An unrecognised option key is refused rather than ignored.
 - **Information theory**: 1 function
   - `mutual_information(joint)` — `I(X;Y)` in nats, from a row-major joint distribution (`joint[i][j] = P(X=i, Y=j)`, summing to 1). The marginals are derived from it. Everything else in this module takes a single distribution, so nothing could express a relationship between two variables
+
+  The joint is divided through by its observed sum rather than assumed to be exactly 1. Since the tolerance admits drift by design (callers normalize in f32), a joint summing slightly below 1 would otherwise report a positive mutual information for variables that are exactly independent.
 
 ### Changed
 

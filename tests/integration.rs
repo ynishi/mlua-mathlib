@@ -1174,6 +1174,73 @@ fn paired_bootstrap_diff_cancels_shared_variation_via_lua() {
 }
 
 #[test]
+fn paired_bootstrap_diff_reports_a_real_width_via_lua() {
+    let lua = setup();
+    // The difference varies per pair, so the interval has to have width — the
+    // constant-offset case collapses to zero and would hide an interval that
+    // never widens.
+    let code = r#"
+        local xs = {10, 12, 14, 16, 18, 20, 22, 24}
+        local ys = { 9, 13, 12, 18, 15, 22, 19, 26}
+        local ci = math.paired_bootstrap_diff(xs, ys, 2000, 11)
+        local width = ci.upper - ci.lower
+        -- mean difference is +0.5, and the per-pair differences straddle zero
+        if width < 0.5 then return "interval too narrow: " .. width end
+        if ci.lower > ci.point or ci.point > ci.upper then return "does not bracket the point" end
+        if ci.observations ~= 8 then return "observations=" .. ci.observations end
+        -- the sign is genuinely undecided here
+        if not (ci.lower < 0 and ci.upper > 0) then
+            return string.format("expected to straddle zero: [%f, %f]", ci.lower, ci.upper)
+        end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
+#[test]
+fn bootstrap_mean_matches_the_cluster_path_via_lua() {
+    let lua = setup();
+    // The Lua-facing pair, not just the internals: one observation per cluster
+    // is the same resampling, so the same seed must give the same interval.
+    let code = r#"
+        local values = {3, 1, 4, 1, 5, 9}
+        local by_cluster = {{3}, {1}, {4}, {1}, {5}, {9}}
+        local flat = math.bootstrap_mean(values, 500, 21)
+        local clustered = math.cluster_bootstrap_mean(by_cluster, 500, 21)
+        return flat.lower == clustered.lower
+            and flat.upper == clustered.upper
+            and flat.point == clustered.point
+            and flat.observations == clustered.clusters
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "the flat and cluster paths must agree at the same seed");
+}
+
+#[test]
+fn resampling_errors_name_the_right_signature_via_lua() {
+    let lua = setup();
+    // A caller who swapped draws and seed gets told which signature to check,
+    // and it has to be the one they actually called.
+    let code = r#"
+        local _, flat = pcall(math.bootstrap_mean, {1, 2, 3}, 1e10, 1)
+        local _, paired = pcall(math.paired_bootstrap_diff, {1, 2}, {3, 4}, 1e10, 1)
+        local _, clustered = pcall(math.cluster_bootstrap_mean, {{1}, {2}}, 1e10, 1)
+        local _, single = pcall(math.bootstrap_mean, {1}, 100, 1)
+        return tostring(flat) .. " | " .. tostring(paired) .. " | "
+            .. tostring(clustered) .. " | " .. tostring(single)
+    "#;
+    let msg: String = lua.load(code).eval().unwrap();
+    assert!(msg.contains("(values, draws, seed)"), "got: {msg}");
+    assert!(msg.contains("(xs, ys, draws, seed)"), "got: {msg}");
+    assert!(msg.contains("(by_cluster, draws, seed)"), "got: {msg}");
+    assert!(
+        msg.contains("at least 2 observations"),
+        "a flat series must not be told about clusters: {msg}"
+    );
+}
+
+#[test]
 fn paired_bootstrap_diff_requires_equal_lengths_via_lua() {
     let lua = setup();
     let code = r#"
@@ -1225,6 +1292,52 @@ fn permutation_test_alternative_option_via_lua() {
 }
 
 #[test]
+fn permutation_test_rejects_a_misspelled_option_via_lua() {
+    let lua = setup();
+    // A typo'd key used to leave `alternative` unset, so a caller asking for a
+    // one-sided test silently received a two-sided p-value.
+    let code = r#"
+        local low = {1, 2, 3, 4, 5}
+        local high = {6, 7, 8, 9, 10}
+        local _, typo = pcall(math.permutation_test, high, low, 100, 1,
+            {alternatve = "greater"})
+        local _, wrong_type = pcall(math.permutation_test, high, low, 100, 1,
+            {alternative = 42})
+        return tostring(typo) .. " | " .. tostring(wrong_type)
+    "#;
+    let msg: String = lua.load(code).eval().unwrap();
+    assert!(
+        msg.contains("unknown option"),
+        "typo must be refused: {msg}"
+    );
+    assert!(msg.contains("alternatve"), "the typo must be quoted: {msg}");
+    assert!(
+        msg.matches("permutation_test").count() >= 2,
+        "both calls must fail: {msg}"
+    );
+}
+
+#[test]
+fn permutation_test_counts_floating_point_ties_via_lua() {
+    let lua = setup();
+    // Identical multisets: every arrangement ties, so p is exactly 1. Summing
+    // 0.1 + 0.2 + 0.3 in different orders differs by ulps, and an exact
+    // comparison dropped those ties and reported p ≈ 0.80.
+    let code = r#"
+        local r = math.permutation_test({0.1, 0.2, 0.3}, {0.2, 0.3, 0.1}, 2000, 1)
+        if r.extreme_draws ~= r.draws then
+            return "dropped ties: " .. r.extreme_draws .. "/" .. r.draws
+        end
+        local off = r.p_value - 1.0
+        if off < 0 then off = -off end
+        if off > 1e-12 then return "p=" .. r.p_value end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
+#[test]
 fn mutual_information_via_lua() {
     let lua = setup();
     let code = r#"
@@ -1239,8 +1352,9 @@ fn mutual_information_via_lua() {
         if off < 0 then off = -off end
         if off > 1e-9 then return "dep=" .. dep .. " hx=" .. hx end
 
+        -- a ragged matrix names the offending row, 1-based
         local _, err = pcall(math.mutual_information, {{0.5, 0.5}, {0.0}})
-        if string.find(tostring(err), "length mismatch", 1, true) == nil then
+        if string.find(tostring(err), "joint[2] has 1 columns", 1, true) == nil then
             return "ragged: " .. tostring(err)
         end
         return "ok"

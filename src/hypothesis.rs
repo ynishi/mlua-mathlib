@@ -255,11 +255,17 @@ impl Alternative {
         }
     }
 
-    fn counts(self, permuted: f64, observed: f64) -> bool {
+    /// Whether a reshuffled statistic counts as at least as extreme.
+    ///
+    /// `gamma` admits the ulps that separate two sums of the same multiset in
+    /// different orders — without it, permutations that genuinely tie with the
+    /// observed value fall out of the count and the p-value comes back too
+    /// small, which is the wrong direction for a significance test.
+    fn counts(self, permuted: f64, observed: f64, gamma: f64) -> bool {
         match self {
-            Self::TwoSided => permuted.abs() >= observed.abs(),
-            Self::Greater => permuted >= observed,
-            Self::Less => permuted <= observed,
+            Self::TwoSided => permuted.abs() >= observed.abs() - gamma,
+            Self::Greater => permuted >= observed - gamma,
+            Self::Less => permuted <= observed + gamma,
         }
     }
 }
@@ -279,6 +285,15 @@ impl Alternative {
 /// it the estimate can reach exactly zero, which claims more than any finite
 /// number of draws can support. The floor is therefore `1 / (1 + draws)`
 /// [Phipson & Smyth 2010].
+///
+/// # Ties are counted with a tolerance
+///
+/// `observed` is summed once in the caller's order while each `permuted` is
+/// summed in a shuffled one, and a sum of the same multiset differs by ulps
+/// between the two. An exact comparison therefore drops permutations that
+/// genuinely tie, understating the p-value — the anti-conservative direction.
+/// The tolerance scales with the length and magnitude the sums are built from,
+/// which is where that error comes from.
 fn permutation_test_impl(
     xs: &[f64],
     ys: &[f64],
@@ -306,12 +321,22 @@ fn permutation_test_impl(
     pool.extend_from_slice(xs);
     pool.extend_from_slice(ys);
 
+    let n = pool.len();
+    let n2 = n - n1;
+    let total: f64 = pool.iter().sum();
+    let scale: f64 = pool.iter().map(|v| v.abs()).sum::<f64>() / n as f64;
+    let gamma = 4.0 * n as f64 * f64::EPSILON * (observed.abs() + scale);
+
     let mut rng = StdRng::seed_from_u64(seed);
     let mut extreme = 0usize;
     for _ in 0..draws {
-        pool.shuffle(&mut rng);
-        let permuted = mean_impl(&pool[..n1]) - mean_impl(&pool[n1..]);
-        if alternative.counts(permuted, observed) {
+        // Only the first n1 slots decide the split, so a partial shuffle is
+        // enough; and the second group's sum is the pooled total minus the
+        // first's, so it never has to be walked.
+        pool.partial_shuffle(&mut rng, n1);
+        let first: f64 = pool[..n1].iter().sum();
+        let permuted = first / n1 as f64 - (total - first) / n2 as f64;
+        if alternative.counts(permuted, observed, gamma) {
             extreme += 1;
         }
     }
@@ -521,9 +546,35 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
             )| {
                 let xs = table_to_vec(&xs_t)?;
                 let ys = table_to_vec(&ys_t)?;
-                let alternative = match opts.and_then(|o| o.get::<String>("alternative").ok()) {
-                    Some(s) => Alternative::parse(&s)
-                        .map_err(|e| LuaError::runtime(format!("permutation_test: {e}")))?,
+                // `Option<String>` rather than `.ok()`: a missing key is the
+                // default, but a key holding the wrong type is an error. With
+                // `.ok()` a typo'd key ("alternatve") fell through to
+                // two_sided and the caller got a two-sided p-value with no
+                // sign that the option had been ignored.
+                let alternative = match opts {
+                    Some(o) => {
+                        // Reject an unrecognised key outright. A missing
+                        // "alternative" is indistinguishable from a typo'd one
+                        // otherwise, and the caller would receive a two-sided
+                        // p-value having asked for a one-sided test.
+                        for pair in o.pairs::<LuaValue, LuaValue>() {
+                            let (key, _) = pair?;
+                            let name = key.to_string()?;
+                            if name != "alternative" {
+                                return Err(LuaError::runtime(format!(
+                                    "permutation_test: unknown option \"{name}\"; the only option \
+                                     is \"alternative\""
+                                )));
+                            }
+                        }
+                        match o.get::<Option<String>>("alternative").map_err(|e| {
+                            LuaError::runtime(format!("permutation_test: alternative: {e}"))
+                        })? {
+                            Some(s) => Alternative::parse(&s)
+                                .map_err(|e| LuaError::runtime(format!("permutation_test: {e}")))?,
+                            None => Alternative::TwoSided,
+                        }
+                    }
                     None => Alternative::TwoSided,
                 };
                 let (observed, p_value, extreme) =
@@ -743,6 +794,44 @@ mod tests {
             permutation_test_impl(&high, &low, 2000, 4, Alternative::Less).unwrap();
         assert!(p_greater < 0.05, "got {p_greater}");
         assert!(p_less > 0.95, "got {p_less}");
+    }
+
+    #[test]
+    fn permutation_counts_ties_that_only_floating_point_separates() {
+        // Two identical multisets: every arrangement ties with the observed
+        // difference, so the exact p-value is 1. But `observed` is summed in
+        // the caller's order and each permutation in a shuffled one, and
+        // 0.1 + 0.2 + 0.3 is not associative in binary — an exact `>=` drops
+        // 20 of the 90 distinct arrangements and reports p ≈ 0.80.
+        let xs = [0.1, 0.2, 0.3];
+        let ys = [0.2, 0.3, 0.1];
+        let (observed, p, extreme) =
+            permutation_test_impl(&xs, &ys, 2000, 1, Alternative::TwoSided).unwrap();
+        assert!(observed != 0.0, "the residue is real: {observed:e}");
+        assert_eq!(extreme, 2000, "every draw ties under the null");
+        assert!((p - 1.0).abs() < 1e-12, "got p={p}");
+    }
+
+    #[test]
+    fn permutation_handles_unequal_group_sizes() {
+        // The split is pool[..n1] / pool[n1..], so unequal sizes are where a
+        // partition bug would show. 2 vs 7.
+        let small = [10.0, 11.0];
+        let large = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+        let (obs, p, _) =
+            permutation_test_impl(&small, &large, 2000, 5, Alternative::TwoSided).unwrap();
+        assert!((obs - (10.5 - 4.0)).abs() < 1e-12, "got {obs}");
+        assert!(
+            p < 0.1,
+            "the small group sits above all of the large: p={p}"
+        );
+
+        // Reversing the roles flips the sign of the observed difference and
+        // leaves the two-sided p-value where it was.
+        let (obs_rev, p_rev, _) =
+            permutation_test_impl(&large, &small, 2000, 5, Alternative::TwoSided).unwrap();
+        assert!((obs_rev + obs).abs() < 1e-12, "{obs_rev} vs {obs}");
+        assert!((p_rev - p).abs() < 0.05, "{p_rev} vs {p}");
     }
 
     #[test]

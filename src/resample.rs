@@ -23,6 +23,54 @@ const MIN_CLUSTERS: usize = 2;
 /// gigabytes before doing anything. Well past any useful resample count.
 const MAX_DRAWS: usize = 10_000_000;
 
+/// What one resampling unit is, for the caller-facing wording.
+///
+/// The machinery is the same in every case; only the vocabulary and the
+/// argument order quoted back on an error differ. Naming the wrong one would
+/// send a caller who mixed up `draws` and `seed` to check a signature that is
+/// not the one they called.
+#[derive(Clone, Copy)]
+enum Unit {
+    Cluster,
+    Observation,
+    Pair,
+}
+
+impl Unit {
+    fn singular(self) -> &'static str {
+        match self {
+            Self::Cluster => "cluster",
+            Self::Observation => "observation",
+            Self::Pair => "pair",
+        }
+    }
+
+    fn plural(self) -> &'static str {
+        match self {
+            Self::Cluster => "clusters",
+            Self::Observation => "observations",
+            Self::Pair => "pairs",
+        }
+    }
+
+    /// The key this unit is reported under in the returned table.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Cluster => "clusters",
+            // A pair is one observation of the difference.
+            Self::Observation | Self::Pair => "observations",
+        }
+    }
+
+    fn signature(self) -> &'static str {
+        match self {
+            Self::Cluster => "(by_cluster, draws, seed)",
+            Self::Observation => "(values, draws, seed)",
+            Self::Pair => "(xs, ys, draws, seed)",
+        }
+    }
+}
+
 /// A percentile interval and the accounting of the draws behind it.
 #[derive(Debug)]
 struct Interval {
@@ -111,12 +159,15 @@ fn cluster_bootstrap(
     draws: usize,
     seed: u64,
     confidence: f64,
+    unit: Unit,
     stat: impl Fn(&[usize]) -> Option<f64>,
 ) -> Result<Interval, String> {
     if clusters < MIN_CLUSTERS {
         return Err(format!(
-            "needs at least {MIN_CLUSTERS} clusters to resample, got {clusters}; a single cluster \
-             gives the same draw every time and would report a zero-width interval"
+            "needs at least {MIN_CLUSTERS} {} to resample, got {clusters}; a single {} gives the \
+             same draw every time and would report a zero-width interval",
+            unit.plural(),
+            unit.singular()
         ));
     }
     if draws == 0 {
@@ -124,8 +175,8 @@ fn cluster_bootstrap(
     }
     if draws > MAX_DRAWS {
         return Err(format!(
-            "draws is capped at {MAX_DRAWS}, got {draws}; check the argument order — it is \
-             (by_cluster, draws, seed)"
+            "draws is capped at {MAX_DRAWS}, got {draws}; check the argument order — it is {}",
+            unit.signature()
         ));
     }
     if !(0.0..=1.0).contains(&confidence) {
@@ -223,16 +274,14 @@ fn assert_same_clusters(a: &[Vec<f64>], b: &[Vec<f64>], names: (&str, &str)) -> 
     Ok(())
 }
 
-/// `unit_key` names what was resampled — `clusters` for the cluster family,
-/// `observations` where each unit is a single measurement.
-fn interval_to_table(lua: &Lua, iv: &Interval, unit_key: &str) -> LuaResult<LuaTable> {
+fn interval_to_table(lua: &Lua, iv: &Interval, unit: Unit) -> LuaResult<LuaTable> {
     let t = lua.create_table()?;
     t.set("point", iv.point)?;
     t.set("lower", iv.lower)?;
     t.set("upper", iv.upper)?;
     t.set("draws_used", iv.draws_used)?;
     t.set("undefined_draws", iv.undefined_draws)?;
-    t.set(unit_key, iv.clusters)?;
+    t.set(unit.key(), iv.clusters)?;
     Ok(t)
 }
 
@@ -242,14 +291,20 @@ fn interval_to_table(lua: &Lua, iv: &Interval, unit_key: &str) -> LuaResult<LuaT
 /// Correct when the observations are independent; where they arrive in
 /// correlated groups this understates the spread and the cluster family is
 /// what applies.
+///
+/// `undefined_draws` is always 0 here: every unit carries exactly one value,
+/// so a draw can never come up empty. The field earns its keep in the cluster
+/// family, where an empty cluster or a zero denominator can leave a draw with
+/// nothing to compute.
 fn bootstrap_values(
     values: &[f64],
     draws: usize,
     seed: u64,
     confidence: f64,
+    unit: Unit,
 ) -> Result<Interval, String> {
     let tallies: Vec<Tally> = values.iter().map(|&v| Tally { sum: v, n: 1 }).collect();
-    cluster_bootstrap(tallies.len(), draws, seed, confidence, |draw| {
+    cluster_bootstrap(tallies.len(), draws, seed, confidence, unit, |draw| {
         tally_over(&tallies, draw).mean()
     })
 }
@@ -267,10 +322,11 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                     draws,
                     seed,
                     confidence.unwrap_or(DEFAULT_CONFIDENCE),
+                    Unit::Cluster,
                     |draw| tally_over(&tallies, draw).mean(),
                 )
                 .map_err(|e| LuaError::runtime(format!("cluster_bootstrap_mean: {e}")))?;
-                interval_to_table(lua, &iv, "clusters")
+                interval_to_table(lua, &iv, Unit::Cluster)
             },
         )?,
     )?;
@@ -301,10 +357,11 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                     draws,
                     seed,
                     confidence.unwrap_or(DEFAULT_CONFIDENCE),
+                    Unit::Cluster,
                     |draw| Some(tally_over(&ta, draw).mean()? - tally_over(&tb, draw).mean()?),
                 )
                 .map_err(|e| LuaError::runtime(format!("cluster_bootstrap_diff: {e}")))?;
-                interval_to_table(lua, &iv, "clusters")
+                interval_to_table(lua, &iv, Unit::Cluster)
             },
         )?,
     )?;
@@ -338,6 +395,7 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                     draws,
                     seed,
                     confidence.unwrap_or(DEFAULT_CONFIDENCE),
+                    Unit::Cluster,
                     |draw| {
                         let d = tally_over(&td, draw).sum;
                         if d == 0.0 || (d > 0.0) != (whole_den > 0.0) {
@@ -347,7 +405,7 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                     },
                 )
                 .map_err(|e| LuaError::runtime(format!("cluster_bootstrap_ratio: {e}")))?;
-                interval_to_table(lua, &iv, "clusters")
+                interval_to_table(lua, &iv, Unit::Cluster)
             },
         )?,
     )?;
@@ -366,9 +424,10 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                     draws,
                     seed,
                     confidence.unwrap_or(DEFAULT_CONFIDENCE),
+                    Unit::Observation,
                 )
                 .map_err(|e| LuaError::runtime(format!("bootstrap_mean: {e}")))?;
-                interval_to_table(lua, &iv, "observations")
+                interval_to_table(lua, &iv, Unit::Observation)
             },
         )?,
     )?;
@@ -407,9 +466,10 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                     draws,
                     seed,
                     confidence.unwrap_or(DEFAULT_CONFIDENCE),
+                    Unit::Pair,
                 )
                 .map_err(|e| LuaError::runtime(format!("paired_bootstrap_diff: {e}")))?;
-                interval_to_table(lua, &iv, "observations")
+                interval_to_table(lua, &iv, Unit::Pair)
             },
         )?,
     )?;
@@ -438,6 +498,7 @@ mod tests {
             200,
             7,
             0.95,
+            Unit::Cluster,
             mean_of(&one_per_cluster(&[1.0, 2.0, 3.0, 4.0])),
         )
         .unwrap();
@@ -449,7 +510,7 @@ mod tests {
         // Holds for a mean over a symmetric sample. It is not a guarantee of
         // the method — see the skew note on `cluster_bootstrap`.
         let c = one_per_cluster(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
-        let iv = cluster_bootstrap(8, 2000, 1, 0.95, mean_of(&c)).unwrap();
+        let iv = cluster_bootstrap(8, 2000, 1, 0.95, Unit::Cluster, mean_of(&c)).unwrap();
         assert!(iv.lower <= iv.point && iv.point <= iv.upper);
         assert!(iv.lower < iv.upper);
     }
@@ -457,9 +518,9 @@ mod tests {
     #[test]
     fn same_seed_gives_the_same_interval() {
         let c = one_per_cluster(&[3.0, 1.0, 4.0, 1.0, 5.0, 9.0]);
-        let a = cluster_bootstrap(6, 500, 42, 0.95, mean_of(&c)).unwrap();
-        let b = cluster_bootstrap(6, 500, 42, 0.95, mean_of(&c)).unwrap();
-        let other = cluster_bootstrap(6, 500, 43, 0.95, mean_of(&c)).unwrap();
+        let a = cluster_bootstrap(6, 500, 42, 0.95, Unit::Cluster, mean_of(&c)).unwrap();
+        let b = cluster_bootstrap(6, 500, 42, 0.95, Unit::Cluster, mean_of(&c)).unwrap();
+        let other = cluster_bootstrap(6, 500, 43, 0.95, Unit::Cluster, mean_of(&c)).unwrap();
         assert_eq!(a.lower.to_bits(), b.lower.to_bits());
         assert_eq!(a.upper.to_bits(), b.upper.to_bits());
         assert!(a.lower != other.lower || a.upper != other.upper);
@@ -468,16 +529,16 @@ mod tests {
     #[test]
     fn a_wider_confidence_gives_a_wider_interval() {
         let c = one_per_cluster(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
-        let narrow = cluster_bootstrap(8, 2000, 3, 0.50, mean_of(&c)).unwrap();
-        let wide = cluster_bootstrap(8, 2000, 3, 0.99, mean_of(&c)).unwrap();
+        let narrow = cluster_bootstrap(8, 2000, 3, 0.50, Unit::Cluster, mean_of(&c)).unwrap();
+        let wide = cluster_bootstrap(8, 2000, 3, 0.99, Unit::Cluster, mean_of(&c)).unwrap();
         assert!(wide.upper - wide.lower > narrow.upper - narrow.lower);
     }
 
     #[test]
     fn confidence_of_one_spans_the_draws_and_of_zero_collapses() {
         let c = one_per_cluster(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let full = cluster_bootstrap(6, 500, 8, 1.0, mean_of(&c)).unwrap();
-        let none = cluster_bootstrap(6, 500, 8, 0.0, mean_of(&c)).unwrap();
+        let full = cluster_bootstrap(6, 500, 8, 1.0, Unit::Cluster, mean_of(&c)).unwrap();
+        let none = cluster_bootstrap(6, 500, 8, 0.0, Unit::Cluster, mean_of(&c)).unwrap();
         assert!(full.lower < none.lower && none.upper < full.upper);
         assert!(
             (none.upper - none.lower).abs() < 1e-12,
@@ -488,7 +549,7 @@ mod tests {
     #[test]
     fn a_single_draw_is_allowed_and_gives_that_draw() {
         let c = one_per_cluster(&[1.0, 2.0, 3.0, 4.0]);
-        let iv = cluster_bootstrap(4, 1, 5, 0.95, mean_of(&c)).unwrap();
+        let iv = cluster_bootstrap(4, 1, 5, 0.95, Unit::Cluster, mean_of(&c)).unwrap();
         assert_eq!(iv.draws_used, 1);
         assert!((iv.upper - iv.lower).abs() < 1e-12);
     }
@@ -496,7 +557,7 @@ mod tests {
     #[test]
     fn a_constant_sample_gives_a_zero_width_interval() {
         let c = one_per_cluster(&[2.0; 5]);
-        let iv = cluster_bootstrap(5, 300, 11, 0.95, mean_of(&c)).unwrap();
+        let iv = cluster_bootstrap(5, 300, 11, 0.95, Unit::Cluster, mean_of(&c)).unwrap();
         assert!((iv.upper - iv.lower).abs() < 1e-12);
         assert!((iv.point - 2.0).abs() < 1e-12);
     }
@@ -506,7 +567,7 @@ mod tests {
         // Cluster 2 holds no observations. The mean over a draw that names only
         // it is undefined; over a draw that names others it is their mean.
         let c = vec![vec![4.0], vec![], vec![6.0]];
-        let iv = cluster_bootstrap(3, 2000, 5, 0.95, mean_of(&c)).unwrap();
+        let iv = cluster_bootstrap(3, 2000, 5, 0.95, Unit::Cluster, mean_of(&c)).unwrap();
         assert_eq!(iv.clusters, 3);
         assert!((iv.point - 5.0).abs() < 1e-12);
         assert!(iv.undefined_draws > 0, "expected some undefined draws");
@@ -516,7 +577,7 @@ mod tests {
     #[test]
     fn undefined_on_the_whole_sample_is_an_error() {
         let c: Vec<Vec<f64>> = vec![vec![], vec![]];
-        let err = cluster_bootstrap(2, 100, 1, 0.95, mean_of(&c)).unwrap_err();
+        let err = cluster_bootstrap(2, 100, 1, 0.95, Unit::Cluster, mean_of(&c)).unwrap_err();
         assert!(
             err.contains("undefined on the sample as walked"),
             "got: {err}"
@@ -528,29 +589,30 @@ mod tests {
         // One cluster means one possible draw, and an interval of width zero
         // that would read as infinite precision.
         let c = one_per_cluster(&[1.0]);
-        let err = cluster_bootstrap(1, 100, 1, 0.95, mean_of(&c)).unwrap_err();
+        let err = cluster_bootstrap(1, 100, 1, 0.95, Unit::Cluster, mean_of(&c)).unwrap_err();
         assert!(err.contains("at least 2 clusters"), "got: {err}");
     }
 
     #[test]
     fn zero_draws_and_an_implausible_draw_count_are_errors() {
         let c = one_per_cluster(&[1.0, 2.0]);
-        assert!(cluster_bootstrap(2, 0, 1, 0.95, mean_of(&c)).is_err());
-        let err = cluster_bootstrap(2, MAX_DRAWS + 1, 1, 0.95, mean_of(&c)).unwrap_err();
+        assert!(cluster_bootstrap(2, 0, 1, 0.95, Unit::Cluster, mean_of(&c)).is_err());
+        let err =
+            cluster_bootstrap(2, MAX_DRAWS + 1, 1, 0.95, Unit::Cluster, mean_of(&c)).unwrap_err();
         assert!(err.contains("argument order"), "got: {err}");
     }
 
     #[test]
     fn confidence_outside_the_unit_interval_is_an_error() {
         let c = one_per_cluster(&[1.0, 2.0]);
-        assert!(cluster_bootstrap(2, 10, 1, 1.5, mean_of(&c)).is_err());
+        assert!(cluster_bootstrap(2, 10, 1, 1.5, Unit::Cluster, mean_of(&c)).is_err());
     }
 
     #[test]
     fn a_difference_of_identical_sides_brackets_zero() {
         let a = one_per_cluster(&[1.0, 2.0, 3.0, 4.0, 5.0]);
         let (ta, tb) = (cluster_tallies(&a), cluster_tallies(&a));
-        let iv = cluster_bootstrap(5, 2000, 9, 0.95, |d| {
+        let iv = cluster_bootstrap(5, 2000, 9, 0.95, Unit::Cluster, |d| {
             Some(tally_over(&ta, d).mean()? - tally_over(&tb, d).mean()?)
         })
         .unwrap();
@@ -569,14 +631,14 @@ mod tests {
         let b: Vec<Vec<f64>> = a.iter().map(|c| vec![c[0] + 2.0]).collect();
         let (ta, tb) = (cluster_tallies(&a), cluster_tallies(&b));
 
-        let paired = cluster_bootstrap(5, 2000, 4, 0.95, |d| {
+        let paired = cluster_bootstrap(5, 2000, 4, 0.95, Unit::Cluster, |d| {
             Some(tally_over(&ta, d).mean()? - tally_over(&tb, d).mean()?)
         })
         .unwrap();
         assert!((paired.point + 2.0).abs() < 1e-12);
 
-        let sep_a = cluster_bootstrap(5, 2000, 4, 0.95, mean_of(&a)).unwrap();
-        let sep_b = cluster_bootstrap(5, 2000, 77, 0.95, mean_of(&b)).unwrap();
+        let sep_a = cluster_bootstrap(5, 2000, 4, 0.95, Unit::Cluster, mean_of(&a)).unwrap();
+        let sep_b = cluster_bootstrap(5, 2000, 77, 0.95, Unit::Cluster, mean_of(&b)).unwrap();
         // The interval a naive caller would build from two separate runs.
         let naive_width = (sep_a.upper - sep_b.lower) - (sep_a.lower - sep_b.upper);
 
@@ -599,7 +661,7 @@ mod tests {
             cluster_tallies(&[vec![1.0], vec![3.0]]),
             cluster_tallies(&[vec![1.0], vec![9.0]]),
         );
-        let iv = cluster_bootstrap(2, 500, 2, 0.95, |d| {
+        let iv = cluster_bootstrap(2, 500, 2, 0.95, Unit::Cluster, |d| {
             let s = tally_over(&td, d).sum;
             if s == 0.0 {
                 return None;
@@ -617,7 +679,7 @@ mod tests {
             cluster_tallies(&[vec![0.0], vec![5.0]]),
         );
         let whole: f64 = td.iter().map(|t| t.sum).sum();
-        let iv = cluster_bootstrap(2, 2000, 6, 0.95, |d| {
+        let iv = cluster_bootstrap(2, 2000, 6, 0.95, Unit::Cluster, |d| {
             let s = tally_over(&td, d).sum;
             if s == 0.0 || (s > 0.0) != (whole > 0.0) {
                 return None;
@@ -632,8 +694,14 @@ mod tests {
 
     #[test]
     fn a_flat_series_resamples_one_observation_per_unit() {
-        let iv =
-            bootstrap_values(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 2000, 1, 0.95).unwrap();
+        let iv = bootstrap_values(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            2000,
+            1,
+            0.95,
+            Unit::Observation,
+        )
+        .unwrap();
         assert!((iv.point - 4.5).abs() < 1e-12);
         assert!(iv.lower < iv.point && iv.point < iv.upper);
         assert_eq!(iv.clusters, 8, "each observation is its own unit");
@@ -645,9 +713,16 @@ mod tests {
         // bootstrap_values is the cluster machinery with singleton clusters, so
         // the two must agree bit for bit at the same seed.
         let values = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0];
-        let flat = bootstrap_values(&values, 500, 21, 0.95).unwrap();
-        let clustered =
-            cluster_bootstrap(6, 500, 21, 0.95, mean_of(&one_per_cluster(&values))).unwrap();
+        let flat = bootstrap_values(&values, 500, 21, 0.95, Unit::Observation).unwrap();
+        let clustered = cluster_bootstrap(
+            6,
+            500,
+            21,
+            0.95,
+            Unit::Cluster,
+            mean_of(&one_per_cluster(&values)),
+        )
+        .unwrap();
         assert_eq!(flat.lower.to_bits(), clustered.lower.to_bits());
         assert_eq!(flat.upper.to_bits(), clustered.upper.to_bits());
     }
@@ -661,11 +736,11 @@ mod tests {
         let ys: Vec<f64> = xs.iter().map(|v| v - 2.0).collect();
         let diffs: Vec<f64> = xs.iter().zip(ys.iter()).map(|(a, b)| a - b).collect();
 
-        let paired = bootstrap_values(&diffs, 2000, 4, 0.95).unwrap();
+        let paired = bootstrap_values(&diffs, 2000, 4, 0.95, Unit::Pair).unwrap();
         assert!((paired.point - 2.0).abs() < 1e-12);
         assert!((paired.upper - paired.lower).abs() < 1e-12);
 
-        let side = bootstrap_values(&xs, 2000, 4, 0.95).unwrap();
+        let side = bootstrap_values(&xs, 2000, 4, 0.95, Unit::Observation).unwrap();
         assert!(
             side.upper - side.lower > 20.0,
             "the unpaired side is wide: {side:?}"
@@ -685,7 +760,7 @@ mod tests {
         let whole: f64 = td.iter().map(|t| t.sum).sum();
         assert!((whole - 1.0).abs() < 1e-12);
 
-        let guarded = cluster_bootstrap(3, 2000, 12, 0.95, |d| {
+        let guarded = cluster_bootstrap(3, 2000, 12, 0.95, Unit::Cluster, |d| {
             let s = tally_over(&td, d).sum;
             if s == 0.0 || (s > 0.0) != (whole > 0.0) {
                 return None;
@@ -702,7 +777,7 @@ mod tests {
             "a positive-denominator ratio stays positive"
         );
 
-        let unguarded = cluster_bootstrap(3, 2000, 12, 0.95, |d| {
+        let unguarded = cluster_bootstrap(3, 2000, 12, 0.95, Unit::Cluster, |d| {
             let s = tally_over(&td, d).sum;
             if s == 0.0 {
                 return None;
