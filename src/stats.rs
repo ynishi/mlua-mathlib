@@ -49,9 +49,11 @@ pub(crate) fn variance_impl(values: &[f64]) -> f64 {
     m2 / (n - 1) as f64 // sample variance
 }
 
-/// Percentile with linear interpolation (exclusive method).
-/// `p` is in [0, 100]. Shared with [`crate::resample`] so bootstrap intervals
-/// take their endpoints the same way `percentile` does.
+/// Percentile with linear interpolation (inclusive method).
+/// `p` is in [0, 100]. The rank is `p/100 * (n-1)`, matching R's type 7 and
+/// numpy's `linear` — not the exclusive `p * (n+1)` variant. Shared with
+/// [`crate::resample`] so bootstrap intervals take their endpoints the same
+/// way `percentile` does.
 pub(crate) fn percentile_impl(sorted: &[f64], p: f64) -> f64 {
     let n = sorted.len();
     if n == 1 {

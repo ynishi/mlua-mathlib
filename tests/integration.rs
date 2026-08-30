@@ -959,7 +959,6 @@ fn cluster_bootstrap_mean_via_lua() {
         -- one observation per cluster; the point estimate is their mean
         local by_cluster = {{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}}
         local ci = math.cluster_bootstrap_mean(by_cluster, 2000, 42)
-        if math.abs and false then end
         local ok = ci.point > 4.49 and ci.point < 4.51
             and ci.lower <= ci.point and ci.point <= ci.upper
             and ci.lower < ci.upper
@@ -1053,8 +1052,44 @@ fn cluster_bootstrap_mismatched_sides_error_via_lua() {
     "#;
     let err: String = lua.load(code).eval().unwrap();
     assert!(
-        err.contains("same clusters"),
-        "error should name the mismatch, got: {err}"
+        err.contains("same clusters") && err.contains("a_by_cluster"),
+        "error should name the mismatch and the parameters, got: {err}"
+    );
+}
+
+#[test]
+fn cluster_bootstrap_refuses_a_degenerate_or_implausible_call_via_lua() {
+    let lua = setup();
+    let code = r#"
+        -- one cluster: every draw is the same draw
+        local _, single = pcall(math.cluster_bootstrap_mean, {{1, 2, 3}}, 2000, 42)
+        -- draws and seed swapped: a timestamp as a draw count
+        local _, swapped = pcall(math.cluster_bootstrap_mean, {{1}, {2}}, 1755000000, 42)
+        -- a non-numeric observation, which must name its position
+        local _, badval = pcall(math.cluster_bootstrap_mean, {{1}, {2, "x"}}, 100, 1)
+        return tostring(single) .. " | " .. tostring(swapped) .. " | " .. tostring(badval)
+    "#;
+    let msg: String = lua.load(code).eval().unwrap();
+    assert!(msg.contains("at least 2 clusters"), "got: {msg}");
+    assert!(msg.contains("argument order"), "got: {msg}");
+    assert!(msg.contains("by_cluster[2][2]"), "got: {msg}");
+}
+
+#[test]
+fn cluster_bootstrap_ratio_guards_a_sign_flipping_denominator_via_lua() {
+    let lua = setup();
+    // Whole-sample denominator 3 + 3 - 5 = 1 > 0. Draws naming the negative
+    // cluster twice go negative, and those ratios are a different quantity.
+    let code = r#"
+        local num = {{1}, {1}, {1}}
+        local den = {{3}, {3}, {-5}}
+        local ci = math.cluster_bootstrap_ratio(num, den, 2000, 12)
+        return ci.undefined_draws > 0 and ci.lower > 0
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(
+        ok,
+        "sign-flipping draws must be undefined, keeping the interval positive"
     );
 }
 

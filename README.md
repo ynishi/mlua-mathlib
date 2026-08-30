@@ -184,7 +184,15 @@ observations independently would understate the spread.
 
 `by_cluster` is a sequence of sequences — one inner table per cluster, holding
 that cluster's observations. An empty cluster is allowed and still takes part
-in the resampling.
+in the resampling. At least 2 clusters are required (one cluster gives the same
+draw every time), though a trustworthy interval wants dozens.
+
+**`diff` and `ratio` are paired**: one draw is applied to both sides, so
+`a_by_cluster[i]` and `b_by_cluster[i]` must measure the **same** cluster — two
+models evaluated on the same prompt set, indexed the same way. Only the count
+can be checked; passing two independent groups that happen to be the same length
+manufactures a correlation that is not there and reports an interval far too
+narrow. For genuinely independent groups, bootstrap each side separately.
 
 ```lua
 local by_game = {{0.3, 0.5}, {0.2}, {}, {0.8, 0.1, 0.4}}
@@ -193,16 +201,31 @@ local ci = math.cluster_bootstrap_mean(by_game, 2000, 42)
 ```
 
 `undefined_draws` counts the resamples on which the statistic had no value —
-no observations for a mean, a zero denominator for a ratio. A large share is
-the signal that the statistic rests on too few clusters to resample. `conf`
-defaults to 0.95, and endpoints are taken with the same interpolated
-`percentile` used elsewhere in this crate. A given seed reproduces a given
-interval.
+no observations for a mean, a zero or sign-flipped denominator for a ratio. A
+large share is the signal that the statistic rests on too few clusters to
+resample. `conf` defaults to 0.95, and endpoints are taken with the same
+interpolated `percentile` used elsewhere in this crate. A given seed reproduces
+a given interval.
+
+Those draws are dropped rather than replaced, so the interval is over the
+resample distribution **conditioned on the statistic being defined** —
+coverage arguments for the unconditional bootstrap do not carry over unchanged.
+`undefined_draws` is what makes that visible.
+
+A percentile interval need not contain the point estimate. For a mean it
+effectively always does; for a skewed statistic such as a ratio it can sit
+entirely to one side. That is the method reporting the shape of the resample
+distribution, and unlike `wilson_ci` — where the endpoints are clamped because
+exact arithmetic already contains `p̂` — there is nothing here to repair.
 
 `diff` and `ratio` are separate functions rather than something you compose
 from `mean`: two separately bootstrapped quantities carry no joint
 distribution, so their intervals cannot be combined after the fact. Both sides
 have to be measured inside the same draw.
+
+`ratio` requires the denominator to keep one sign. A draw whose denominator sum
+crosses zero relative to the whole sample is counted as undefined, since the
+ratio there is a different quantity rather than a perturbation of the estimate.
 
 ### Multiple comparison & effect size
 

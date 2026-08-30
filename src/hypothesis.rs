@@ -296,7 +296,14 @@ fn benjamini_hochberg_impl(p: &[f64]) -> Result<Vec<f64>, String> {
 /// rules of thumb rather than properties of the statistic.
 ///
 /// Assumes roughly comparable spread in the two groups; where that fails,
-/// [`cliffs_delta_impl`] makes no such assumption.
+/// [`cliffs_delta_impl`] makes no such assumption. Note also that `welch_t_test`
+/// in this module deliberately does *not* assume equal variance, so the two do
+/// not rest on the same footing.
+///
+/// Biased upward on small samples — Hedges' correction factor
+/// `1 - 3/(4(nx+ny)-9)` is about 0.7 at the smallest accepted input of two and
+/// two, and approaches 1 as the groups grow. Read `d` with that in mind at
+/// small `n`.
 fn cohens_d_impl(xs: &[f64], ys: &[f64]) -> Result<f64, &'static str> {
     if xs.len() < 2 || ys.len() < 2 {
         return Err("each group needs at least 2 values");
@@ -569,16 +576,29 @@ mod tests {
 
     #[test]
     fn holm_is_monotone_and_never_below_the_raw_value() {
-        let raw = [0.001, 0.008, 0.02, 0.2, 0.9];
+        // Deliberately unsorted: a sorted fixture would let a reversed rank
+        // multiplier (1..n instead of n..1) pass this test, since the result
+        // stays monotone and above the raw values either way.
+        let raw = [0.2, 0.001, 0.9, 0.02, 0.008];
         let adj = holm_impl(&raw).unwrap();
         for (r, a) in raw.iter().zip(adj.iter()) {
             assert!(a >= r, "adjustment must not lower a p-value: {a} < {r}");
             assert!((0.0..=1.0).contains(a));
         }
-        // Ordering is preserved: a smaller raw value never gets a larger adjustment.
-        for i in 1..raw.len() {
-            assert!(adj[i] >= adj[i - 1], "not monotone: {adj:?}");
+        // Order is preserved: rank the pairs by the raw value and the
+        // adjustments must be non-decreasing along that ranking.
+        let mut pairs: Vec<(f64, f64)> = raw.iter().copied().zip(adj.iter().copied()).collect();
+        pairs.sort_by(|x, y| x.0.total_cmp(&y.0));
+        for i in 1..pairs.len() {
+            assert!(pairs[i].1 >= pairs[i - 1].1, "not monotone: {pairs:?}");
         }
+        // The smallest raw value carries the full n multiplier — this is what
+        // pins the direction of the ranking.
+        assert!(
+            (pairs[0].1 - 5.0 * 0.001).abs() < 1e-12,
+            "got {:?}",
+            pairs[0]
+        );
     }
 
     #[test]

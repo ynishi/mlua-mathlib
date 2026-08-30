@@ -14,9 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `cluster_bootstrap_diff(a_by_cluster, b_by_cluster, draws, seed [, confidence])` — interval on the difference, with both sides measured inside the same draw
   - `cluster_bootstrap_ratio(num_by_cluster, den_by_cluster, draws, seed [, confidence])` — interval on the ratio of the summed sides (a ratio estimator, not the mean of per-cluster ratios)
 
-  Each returns `{point, lower, upper, draws_used, undefined_draws, clusters}`. `undefined_draws` counts resamples the statistic was undefined on (an empty cluster set for a mean, a zero denominator for a ratio) — a large share means the statistic rests on too few clusters to resample. `confidence` defaults to 0.95, and a given seed reproduces a given interval.
+  Each returns `{point, lower, upper, draws_used, undefined_draws, clusters}`. `undefined_draws` counts resamples the statistic was undefined on (no observations for a mean, a zero or sign-flipped denominator for a ratio) — a large share means the statistic rests on too few clusters to resample. Those draws are dropped rather than replaced, so the interval is conditioned on the statistic being defined. `confidence` defaults to 0.95, and a given seed reproduces a given interval. At least 2 clusters are required, and `draws` is capped at 10,000,000 so a swapped `draws` / `seed` argument fails loudly instead of reserving tens of gigabytes.
 
-  `diff` and `ratio` exist as their own functions rather than as something a caller composes from `mean`: two separately bootstrapped quantities carry no joint distribution, so their intervals cannot be combined after the fact.
+  `diff` and `ratio` exist as their own functions rather than as something a caller composes from `mean`: two separately bootstrapped quantities carry no joint distribution, so their intervals cannot be combined after the fact. Both are **paired** — one draw is applied to both sides, so `a[i]` and `b[i]` must measure the same cluster. Only the count is checked; passing independent groups of equal length manufactures a correlation and reports an interval far too narrow.
 - **Multiple-comparison adjustment**: 2 functions
   - `holm(p_values)` — Holm-Bonferroni step-down, controlling the family-wise error rate
   - `benjamini_hochberg(p_values)` — step-up, controlling the false discovery rate
