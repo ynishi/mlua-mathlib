@@ -17,9 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`wilson_ci` now returns an interval that contains the point estimate.** The bounds were clamped to `[0, 1]` but not to `p̂`. In exact arithmetic the interval already contains it — at `p̂ = 1` the two halves of the numerator sum to the denominator, so the upper end is exactly 1 — but the floating-point residue leaves it a few ulp short at some sample sizes (observed at n=10 and n=2000 for 95% confidence), and at `p̂ = 0` the lower end lands a hair above zero. A caller reading `lower` could receive a bound that excludes its own estimate, and a gate testing `lower > 0` could read "significantly above zero" from a `p̂` of exactly 0.
-
 ### Security
+
+## [0.4.1] - 2026-08-30
+
+### Fixed
+
+- **`wilson_ci` now returns an interval that contains the point estimate.** The bounds were clamped to `[0, 1]` but not to `p̂`. In exact arithmetic the interval already contains it — at `p̂ = 1` the two halves of the numerator sum to the denominator, so the upper end is exactly 1 — but the floating-point residue leaves it a few ulp short at some sample sizes (observed at n=10 and n=2000 for 95% confidence), and at `p̂ = 0` the lower end lands a hair above zero. A caller reading `lower` could receive a bound that excludes its own estimate, and a gate testing `lower > 0` could read "significantly above zero" from a `p̂` of exactly 0.
 
 ## [0.4.0] - 2026-08-28
 
