@@ -237,7 +237,7 @@ fn cross_entropy_impl(p: &[f64], q: &[f64]) -> Result<f64, DistError> {
     Ok(acc)
 }
 
-/// Hellinger distance: `H(p,q) = sqrt(1 - Σ sqrt(p_i * q_i))`.
+/// Hellinger distance: `H(p,q) = sqrt(Σ (sqrt(p_i) - sqrt(q_i))² / 2)`.
 ///
 /// A true metric on distributions — symmetric, and it satisfies the triangle
 /// inequality, which neither KL (asymmetric) nor its square root does. Bounded

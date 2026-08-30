@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.7.0] - 2026-08-30
+
+### Added
+
 - **Calibration**: 2 functions — whether a model's stated confidence matches how often it is right
   - `calibration_error(confidences, outcomes, bins)` — expected and maximum calibration error over equal-width bins. Returns `{ece, mce, bins, bins_used}`, where `bins` carries per-bin `{count, confidence, accuracy}` so a reliability diagram can be drawn from it
   - `brier_score(confidences, outcomes)` — mean squared error of a probabilistic prediction
@@ -21,16 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Information theory**: 2 distances
   - `hellinger(p, q)` — a true metric on distributions (symmetric and obeying the triangle inequality, which KL does not). Bounded `[0, 1]`. Responds to the *ratio* of two probabilities where `tvd` responds to their difference, so it separates small probabilities that differ by a large factor. Computed as `sqrt(Σ(sqrt(p_i) - sqrt(q_i))² / 2)` rather than the algebraically identical `sqrt(1 - Σ sqrt(p_i q_i))`, which cancels as the distributions converge — that route returns 15x the true distance at `q = p ± 1e-9` and exactly zero at `1e-8`
   - `wasserstein_1d(p, q [, support])` — the area between the two cumulative distributions, in one dimension. **The only distance here that reads the order of the support**: moving mass one bin costs less than moving it ten, which makes it right for ordered outcomes (scores, ranks, positions) and wrong for unordered categories. `support` must be strictly increasing; omitted, positions are `0, 1, 2, …` and the result is in bins. Unbounded above, in the units of the support
-
-### Changed
-
-### Deprecated
-
-### Removed
-
-### Fixed
-
-### Security
 
 ## [0.6.0] - 2026-08-30
 
@@ -183,7 +187,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `iqr(values)` — interquartile range
   - `softmax(values)` — numerically stable softmax
 
-[Unreleased]: https://github.com/ynishi/mlua-mathlib/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/ynishi/mlua-mathlib/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.7.0
 [0.6.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.6.0
 [0.5.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.5.0
 [0.4.1]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.4.1
