@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Resampling**: 3 functions — bootstrap confidence intervals over correlated groups, where the unit of resampling is the cluster rather than the observation
+  - `cluster_bootstrap_mean(by_cluster, draws, seed [, confidence])` — percentile interval on the mean
+  - `cluster_bootstrap_diff(a_by_cluster, b_by_cluster, draws, seed [, confidence])` — interval on the difference, with both sides measured inside the same draw
+  - `cluster_bootstrap_ratio(num_by_cluster, den_by_cluster, draws, seed [, confidence])` — interval on the ratio of the summed sides (a ratio estimator, not the mean of per-cluster ratios)
+
+  Each returns `{point, lower, upper, draws_used, undefined_draws, clusters}`. `undefined_draws` counts resamples the statistic was undefined on (an empty cluster set for a mean, a zero denominator for a ratio) — a large share means the statistic rests on too few clusters to resample. `confidence` defaults to 0.95, and a given seed reproduces a given interval.
+
+  `diff` and `ratio` exist as their own functions rather than as something a caller composes from `mean`: two separately bootstrapped quantities carry no joint distribution, so their intervals cannot be combined after the fact.
+- **Multiple-comparison adjustment**: 2 functions
+  - `holm(p_values)` — Holm-Bonferroni step-down, controlling the family-wise error rate
+  - `benjamini_hochberg(p_values)` — step-up, controlling the false discovery rate
+- **Effect size**: 2 functions
+  - `cohens_d(xs, ys)` — difference in means, in pooled standard deviations
+  - `cliffs_delta(xs, ys)` — `P(x > y) - P(x < y)`, ordinal and distribution-free
+
 ### Changed
 
 ### Deprecated

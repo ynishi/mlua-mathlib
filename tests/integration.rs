@@ -950,6 +950,154 @@ fn error_names_the_offending_element_via_lua() {
     );
 }
 
+// ── v0.5 Resampling / adjustment / effect size ──────────
+
+#[test]
+fn cluster_bootstrap_mean_via_lua() {
+    let lua = setup();
+    let code = r#"
+        -- one observation per cluster; the point estimate is their mean
+        local by_cluster = {{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}}
+        local ci = math.cluster_bootstrap_mean(by_cluster, 2000, 42)
+        if math.abs and false then end
+        local ok = ci.point > 4.49 and ci.point < 4.51
+            and ci.lower <= ci.point and ci.point <= ci.upper
+            and ci.lower < ci.upper
+            and ci.clusters == 8
+            and ci.draws_used == 2000
+            and ci.undefined_draws == 0
+        if not ok then
+            return string.format("point=%f lower=%f upper=%f used=%d undef=%d clusters=%d",
+                ci.point, ci.lower, ci.upper, ci.draws_used, ci.undefined_draws, ci.clusters)
+        end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
+#[test]
+fn cluster_bootstrap_is_reproducible_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local c = {{3}, {1}, {4}, {1}, {5}, {9}, {2}, {6}}
+        local a = math.cluster_bootstrap_mean(c, 500, 7)
+        local b = math.cluster_bootstrap_mean(c, 500, 7)
+        local d = math.cluster_bootstrap_mean(c, 500, 8)
+        return a.lower == b.lower and a.upper == b.upper
+            and not (a.lower == d.lower and a.upper == d.upper)
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "same seed must reproduce, a different seed must not");
+}
+
+#[test]
+fn cluster_bootstrap_diff_pairs_within_a_draw_via_lua() {
+    let lua = setup();
+    // b tracks a with a constant offset, so the difference has no spread —
+    // which only holds because both sides are measured on the same draw.
+    let code = r#"
+        local a = {{1}, {5}, {9}, {13}, {17}}
+        local b = {{3}, {7}, {11}, {15}, {19}}
+        local ci = math.cluster_bootstrap_diff(a, b, 2000, 3)
+        local width = ci.upper - ci.lower
+        if width < 0 then width = -width end
+        local point_off = ci.point + 2.0
+        if point_off < 0 then point_off = -point_off end
+        return width < 1e-9 and point_off < 1e-9
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(
+        ok,
+        "a constant offset must give a zero-width interval at -2"
+    );
+}
+
+#[test]
+fn cluster_bootstrap_ratio_via_lua() {
+    let lua = setup();
+    let code = r#"
+        -- ratio of sums: (1+3) / (1+9) = 0.4, not the mean of 1/1 and 3/9
+        local num = {{1}, {3}}
+        local den = {{1}, {9}}
+        local ci = math.cluster_bootstrap_ratio(num, den, 500, 2)
+        local off = ci.point - 0.4
+        if off < 0 then off = -off end
+        return off < 1e-9
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "ratio must be of the summed sides");
+}
+
+#[test]
+fn cluster_bootstrap_reports_undefined_draws_via_lua() {
+    let lua = setup();
+    // Cluster 2 is empty; a draw naming only it has no observations to average.
+    let code = r#"
+        local c = {{4}, {}, {6}}
+        local ci = math.cluster_bootstrap_mean(c, 2000, 5)
+        return ci.clusters == 3
+            and ci.undefined_draws > 0
+            and ci.draws_used + ci.undefined_draws == 2000
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "empty clusters must surface as undefined draws");
+}
+
+#[test]
+fn cluster_bootstrap_mismatched_sides_error_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local ok, err = pcall(math.cluster_bootstrap_diff, {{1}, {2}}, {{1}}, 100, 1)
+        return tostring(err)
+    "#;
+    let err: String = lua.load(code).eval().unwrap();
+    assert!(
+        err.contains("same clusters"),
+        "error should name the mismatch, got: {err}"
+    );
+}
+
+#[test]
+fn multiple_comparison_adjustments_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local raw = {0.01, 0.04, 0.03}
+        local holm = math.holm(raw)
+        local bh = math.benjamini_hochberg(raw)
+        for i = 1, #raw do
+            if holm[i] < raw[i] then return "holm lowered p[" .. i .. "]" end
+            if bh[i] > holm[i] then return "bh exceeded holm at " .. i end
+            if holm[i] > 1.0 or bh[i] > 1.0 then return "above 1 at " .. i end
+        end
+        -- worked example: holm(0.01) = 3 * 0.01
+        local off = holm[1] - 0.03
+        if off < 0 then off = -off end
+        if off > 1e-12 then return "holm[1]=" .. holm[1] end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
+#[test]
+fn effect_sizes_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local low = {1, 2, 3}
+        local high = {4, 5, 6}
+        local delta = math.cliffs_delta(high, low)
+        local d = math.cohens_d(high, low)
+        local same = math.cliffs_delta(low, low)
+        if delta < 0.999 then return "cliffs_delta=" .. delta end
+        if same > 1e-12 or same < -1e-12 then return "self delta=" .. same end
+        if d <= 0 then return "cohens_d should be positive, got " .. d end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
 // ── v0.3 Special (logsumexp, logit, expit) ──────────────
 
 #[test]

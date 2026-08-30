@@ -50,8 +50,9 @@ pub(crate) fn variance_impl(values: &[f64]) -> f64 {
 }
 
 /// Percentile with linear interpolation (exclusive method).
-/// `p` is in [0, 100].
-fn percentile_impl(sorted: &[f64], p: f64) -> f64 {
+/// `p` is in [0, 100]. Shared with [`crate::resample`] so bootstrap intervals
+/// take their endpoints the same way `percentile` does.
+pub(crate) fn percentile_impl(sorted: &[f64], p: f64) -> f64 {
     let n = sorted.len();
     if n == 1 {
         return sorted[0];

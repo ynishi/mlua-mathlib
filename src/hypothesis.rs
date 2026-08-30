@@ -225,6 +225,118 @@ fn ks_test_impl(xs: &[f64], ys: &[f64]) -> Result<(f64, f64), &'static str> {
     Ok((d_max, p_value))
 }
 
+/// Reject a p-value vector that is empty or holds a value outside [0, 1].
+fn validate_p_values(p: &[f64]) -> Result<(), String> {
+    if p.is_empty() {
+        return Err("expected at least one p-value".into());
+    }
+    for (i, &v) in p.iter().enumerate() {
+        if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+            return Err(format!("p[{}] is not a p-value: {v}", i + 1));
+        }
+    }
+    Ok(())
+}
+
+/// Holm-Bonferroni step-down adjustment.
+///
+/// Controls the family-wise error rate — the chance of *any* false rejection
+/// among the family — and is uniformly more powerful than plain Bonferroni,
+/// with the same assumptions. Compare each returned value against the
+/// uncorrected level.
+///
+/// The running maximum enforces monotonicity: an adjusted value never falls
+/// below one for a smaller raw p-value, which is what makes the step-down
+/// procedure coherent to read.
+fn holm_impl(p: &[f64]) -> Result<Vec<f64>, String> {
+    validate_p_values(p)?;
+    let n = p.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| p[a].total_cmp(&p[b]));
+
+    let mut adjusted = vec![0.0; n];
+    let mut running: f64 = 0.0;
+    for (rank, &i) in order.iter().enumerate() {
+        running = running.max(((n - rank) as f64 * p[i]).min(1.0));
+        adjusted[i] = running;
+    }
+    Ok(adjusted)
+}
+
+/// Benjamini-Hochberg step-up adjustment (false discovery rate).
+///
+/// Controls the expected *share* of false rejections among the rejections
+/// made, which is the weaker guarantee Holm's family-wise control gives up
+/// power for. Prefer it when the family is large and a few false positives
+/// are tolerable.
+///
+/// The running minimum walks from the largest p-value down, enforcing the
+/// monotonicity the step-up procedure requires.
+fn benjamini_hochberg_impl(p: &[f64]) -> Result<Vec<f64>, String> {
+    validate_p_values(p)?;
+    let n = p.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| p[b].total_cmp(&p[a]));
+
+    let mut adjusted = vec![0.0; n];
+    let mut running: f64 = 1.0;
+    for (step, &i) in order.iter().enumerate() {
+        let rank = n - step; // 1-based rank in ascending order
+        running = running.min((n as f64 / rank as f64 * p[i]).min(1.0));
+        adjusted[i] = running;
+    }
+    Ok(adjusted)
+}
+
+/// Cohen's d — the difference in means in pooled standard deviations.
+///
+/// Answers "by how much", which a p-value does not: a vanishing difference
+/// reaches any significance level given enough observations. Conventional
+/// reading is 0.2 small / 0.5 medium / 0.8 large, though those thresholds are
+/// rules of thumb rather than properties of the statistic.
+///
+/// Assumes roughly comparable spread in the two groups; where that fails,
+/// [`cliffs_delta_impl`] makes no such assumption.
+fn cohens_d_impl(xs: &[f64], ys: &[f64]) -> Result<f64, &'static str> {
+    if xs.len() < 2 || ys.len() < 2 {
+        return Err("each group needs at least 2 values");
+    }
+    let (nx, ny) = (xs.len() as f64, ys.len() as f64);
+    let pooled_var =
+        ((nx - 1.0) * variance_impl(xs) + (ny - 1.0) * variance_impl(ys)) / (nx + ny - 2.0);
+    if pooled_var <= 0.0 {
+        return Err("pooled variance is zero; both groups are constant");
+    }
+    Ok((mean_impl(xs) - mean_impl(ys)) / pooled_var.sqrt())
+}
+
+/// Cliff's delta — `P(x > y) - P(x < y)`, in `[-1, 1]`.
+///
+/// Ordinal and distribution-free: it reads only the direction of each
+/// pairwise comparison, so a heavy tail or a non-normal shape does not
+/// distort it the way it distorts [`cohens_d_impl`]. The non-parametric
+/// counterpart of the Mann-Whitney U test, which shares its pairwise
+/// comparison count.
+///
+/// Cost is `O(len(xs) * len(ys))` — the pairs are counted directly.
+fn cliffs_delta_impl(xs: &[f64], ys: &[f64]) -> Result<f64, &'static str> {
+    if xs.is_empty() || ys.is_empty() {
+        return Err("both groups must be non-empty");
+    }
+    let mut greater = 0i64;
+    let mut less = 0i64;
+    for &x in xs {
+        for &y in ys {
+            if x > y {
+                greater += 1;
+            } else if x < y {
+                less += 1;
+            }
+        }
+    }
+    Ok((greater - less) as f64 / (xs.len() * ys.len()) as f64)
+}
+
 pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     t.set(
         "welch_t_test",
@@ -289,6 +401,41 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
             result.set("d_stat", d)?;
             result.set("p_value", p)?;
             Ok(result)
+        })?,
+    )?;
+
+    t.set(
+        "holm",
+        lua.create_function(|_, p_t: LuaTable| {
+            let p = table_to_vec(&p_t)?;
+            holm_impl(&p).map_err(|e| LuaError::runtime(format!("holm: {e}")))
+        })?,
+    )?;
+
+    t.set(
+        "benjamini_hochberg",
+        lua.create_function(|_, p_t: LuaTable| {
+            let p = table_to_vec(&p_t)?;
+            benjamini_hochberg_impl(&p)
+                .map_err(|e| LuaError::runtime(format!("benjamini_hochberg: {e}")))
+        })?,
+    )?;
+
+    t.set(
+        "cohens_d",
+        lua.create_function(|_, (xs_t, ys_t): (LuaTable, LuaTable)| {
+            let xs = table_to_vec(&xs_t)?;
+            let ys = table_to_vec(&ys_t)?;
+            cohens_d_impl(&xs, &ys).map_err(|e| LuaError::runtime(format!("cohens_d: {e}")))
+        })?,
+    )?;
+
+    t.set(
+        "cliffs_delta",
+        lua.create_function(|_, (xs_t, ys_t): (LuaTable, LuaTable)| {
+            let xs = table_to_vec(&xs_t)?;
+            let ys = table_to_vec(&ys_t)?;
+            cliffs_delta_impl(&xs, &ys).map_err(|e| LuaError::runtime(format!("cliffs_delta: {e}")))
         })?,
     )?;
 
@@ -405,5 +552,127 @@ mod tests {
             (d - 1.0).abs() < 1e-10,
             "d={d}, completely separated distributions should have d≈1"
         );
+    }
+
+    // ── multiple-comparison adjustment ──────────────────────
+
+    #[test]
+    fn holm_matches_the_worked_example() {
+        // Holm on [0.01, 0.04, 0.03] with n=3: sorted 0.01, 0.03, 0.04 gets
+        // multipliers 3, 2, 1 -> 0.03, 0.06, 0.04, then the running max makes
+        // the last one 0.06.
+        let adj = holm_impl(&[0.01, 0.04, 0.03]).unwrap();
+        assert!((adj[0] - 0.03).abs() < 1e-12, "got {adj:?}");
+        assert!((adj[2] - 0.06).abs() < 1e-12, "got {adj:?}");
+        assert!((adj[1] - 0.06).abs() < 1e-12, "got {adj:?}");
+    }
+
+    #[test]
+    fn holm_is_monotone_and_never_below_the_raw_value() {
+        let raw = [0.001, 0.008, 0.02, 0.2, 0.9];
+        let adj = holm_impl(&raw).unwrap();
+        for (r, a) in raw.iter().zip(adj.iter()) {
+            assert!(a >= r, "adjustment must not lower a p-value: {a} < {r}");
+            assert!((0.0..=1.0).contains(a));
+        }
+        // Ordering is preserved: a smaller raw value never gets a larger adjustment.
+        for i in 1..raw.len() {
+            assert!(adj[i] >= adj[i - 1], "not monotone: {adj:?}");
+        }
+    }
+
+    #[test]
+    fn holm_on_a_single_p_value_is_the_identity() {
+        let adj = holm_impl(&[0.02]).unwrap();
+        assert!((adj[0] - 0.02).abs() < 1e-12);
+    }
+
+    #[test]
+    fn benjamini_hochberg_matches_the_worked_example() {
+        // n=4, sorted 0.01, 0.02, 0.03, 0.04 -> 4/1*0.01, 4/2*0.02, 4/3*0.03,
+        // 4/4*0.04 = 0.04, 0.04, 0.04, 0.04 after the running minimum.
+        let adj = benjamini_hochberg_impl(&[0.01, 0.02, 0.03, 0.04]).unwrap();
+        for a in &adj {
+            assert!((a - 0.04).abs() < 1e-12, "got {adj:?}");
+        }
+    }
+
+    #[test]
+    fn benjamini_hochberg_is_no_stricter_than_holm() {
+        // FDR control is the weaker guarantee, so its adjustments never exceed
+        // the family-wise ones.
+        let raw = [0.001, 0.008, 0.02, 0.2, 0.9];
+        let bh = benjamini_hochberg_impl(&raw).unwrap();
+        let holm = holm_impl(&raw).unwrap();
+        for (b, h) in bh.iter().zip(holm.iter()) {
+            assert!(b <= h, "BH {b} exceeded Holm {h}");
+        }
+    }
+
+    #[test]
+    fn adjustments_reject_a_value_outside_the_unit_interval() {
+        let err = holm_impl(&[0.5, 1.5]).unwrap_err();
+        assert!(err.contains("p[2]"), "error should name the element: {err}");
+        assert!(benjamini_hochberg_impl(&[]).is_err());
+    }
+
+    // ── effect size ─────────────────────────────────────────
+
+    #[test]
+    fn cohens_d_is_zero_for_identical_groups() {
+        let g = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert!(cohens_d_impl(&g, &g).unwrap().abs() < 1e-12);
+    }
+
+    #[test]
+    fn cohens_d_counts_in_pooled_standard_deviations() {
+        // Two groups of unit sample variance, means one apart -> d = 1.
+        let xs = [0.0, 1.0, 2.0];
+        let ys = [1.0, 2.0, 3.0];
+        let d = cohens_d_impl(&xs, &ys).unwrap();
+        assert!((d + 1.0).abs() < 1e-12, "got {d}");
+        // Antisymmetric in its arguments.
+        assert!((cohens_d_impl(&ys, &xs).unwrap() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cohens_d_refuses_two_constant_groups() {
+        assert!(cohens_d_impl(&[2.0, 2.0], &[5.0, 5.0]).is_err());
+    }
+
+    #[test]
+    fn cliffs_delta_spans_minus_one_to_one() {
+        let low = [1.0, 2.0, 3.0];
+        let high = [4.0, 5.0, 6.0];
+        assert!((cliffs_delta_impl(&high, &low).unwrap() - 1.0).abs() < 1e-12);
+        assert!((cliffs_delta_impl(&low, &high).unwrap() + 1.0).abs() < 1e-12);
+        assert!(cliffs_delta_impl(&low, &low).unwrap().abs() < 1e-12);
+    }
+
+    #[test]
+    fn cliffs_delta_ignores_the_size_of_the_gap() {
+        // Ordinal: only the direction of each comparison is read, so widening
+        // the separation does not move it. Cohen's d does move.
+        let a = [1.0, 2.0];
+        let near = [3.0, 4.0];
+        let far = [300.0, 400.0];
+        let d_near = cliffs_delta_impl(&a, &near).unwrap();
+        let d_far = cliffs_delta_impl(&a, &far).unwrap();
+        assert!((d_near - d_far).abs() < 1e-12, "{d_near} vs {d_far}");
+        assert!(cohens_d_impl(&a, &near).unwrap().abs() < cohens_d_impl(&a, &far).unwrap().abs());
+    }
+
+    #[test]
+    fn cliffs_delta_counts_ties_as_neither_direction() {
+        // Half the pairs tie, half favour xs -> delta = 0.5.
+        let xs = [1.0, 2.0];
+        let ys = [1.0, 1.0];
+        assert!((cliffs_delta_impl(&xs, &ys).unwrap() - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn effect_sizes_refuse_empty_input() {
+        assert!(cliffs_delta_impl(&[], &[1.0]).is_err());
+        assert!(cohens_d_impl(&[1.0], &[1.0, 2.0]).is_err());
     }
 }

@@ -12,6 +12,9 @@ Provides math functions that are impractical or numerically unstable to implemen
 - **CDF/PPF** for Normal, Beta, Gamma, Poisson distributions
 - **16 descriptive & time-series statistics** with numerical stability (Welford variance, interpolated percentiles, Wilson CI, stable softmax, moving average, EWMA, autocorrelation)
 - **4 hypothesis tests** (Welch's t, Mann-Whitney U, chi-squared, Kolmogorov-Smirnov)
+- **3 cluster bootstrap intervals** (mean / difference / ratio, resampling correlated groups)
+- **2 multiple-comparison adjustments** (Holm-Bonferroni, Benjamini-Hochberg)
+- **2 effect sizes** (Cohen's d, Cliff's delta)
 - **5 ranking & IR metrics** (Spearman, Kendall tau-b, NDCG, MRR, fractional rank)
 - **5 information-theoretic functions** (entropy, KL divergence, JS divergence, cross-entropy, total variation distance)
 
@@ -165,6 +168,60 @@ marginally more than ln 2. `kl_divergence` and `cross_entropy` return `math.huge
 where `qᵢ = 0` while `pᵢ > 0` rather than raising, since the definition is
 infinite there. Errors name the element that failed, 1-based as in the Lua table
 (`p[3] is negative: -0.1` for a pairwise call, `probs[3] ...` for `entropy`).
+
+### Resampling
+
+Bootstrap intervals where the unit of resampling is the **cluster**, not the
+observation — for measurements that arrive in correlated groups (repeated
+samples from one prompt, several positions from one game). Resampling
+observations independently would understate the spread.
+
+| Function | Description |
+|----------|-------------|
+| `cluster_bootstrap_mean(by_cluster, draws, seed [, conf])` | Percentile interval on the mean |
+| `cluster_bootstrap_diff(a_by_cluster, b_by_cluster, draws, seed [, conf])` | Interval on the difference, both sides from the same draw |
+| `cluster_bootstrap_ratio(num_by_cluster, den_by_cluster, draws, seed [, conf])` | Interval on the ratio of the summed sides |
+
+`by_cluster` is a sequence of sequences — one inner table per cluster, holding
+that cluster's observations. An empty cluster is allowed and still takes part
+in the resampling.
+
+```lua
+local by_game = {{0.3, 0.5}, {0.2}, {}, {0.8, 0.1, 0.4}}
+local ci = math.cluster_bootstrap_mean(by_game, 2000, 42)
+-- {point, lower, upper, draws_used, undefined_draws, clusters}
+```
+
+`undefined_draws` counts the resamples on which the statistic had no value —
+no observations for a mean, a zero denominator for a ratio. A large share is
+the signal that the statistic rests on too few clusters to resample. `conf`
+defaults to 0.95, and endpoints are taken with the same interpolated
+`percentile` used elsewhere in this crate. A given seed reproduces a given
+interval.
+
+`diff` and `ratio` are separate functions rather than something you compose
+from `mean`: two separately bootstrapped quantities carry no joint
+distribution, so their intervals cannot be combined after the fact. Both sides
+have to be measured inside the same draw.
+
+### Multiple comparison & effect size
+
+| Function | Description |
+|----------|-------------|
+| `holm(p_values)` | Holm-Bonferroni step-down; controls the family-wise error rate |
+| `benjamini_hochberg(p_values)` | Step-up; controls the false discovery rate |
+| `cohens_d(xs, ys)` | Difference in means, in pooled standard deviations |
+| `cliffs_delta(xs, ys)` | `P(x > y) - P(x < y)`, in [-1, 1] |
+
+The adjustments return a table of the same length, in the input order; compare
+each against the uncorrected level. Holm gives the stronger guarantee (no false
+rejection anywhere in the family), Benjamini-Hochberg the weaker one (a bounded
+share of the rejections made) in exchange for power.
+
+Effect sizes answer "by how much", which a p-value does not — any difference
+reaches any significance level given enough observations. `cohens_d` assumes
+comparable spread in the two groups; `cliffs_delta` reads only the direction of
+each pairwise comparison, so a heavy tail does not distort it.
 
 ## Why not pure Lua?
 
