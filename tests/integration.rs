@@ -1363,6 +1363,136 @@ fn mutual_information_via_lua() {
     assert_eq!(res, "ok");
 }
 
+// ── v0.7 Calibration / distribution distance ────────────
+
+#[test]
+fn calibration_error_via_lua() {
+    let lua = setup();
+    let code = r#"
+        -- perfectly calibrated: certain and right, certain and wrong-free
+        local perfect = math.calibration_error({0, 0, 1, 1}, {0, 0, 1, 1}, 10)
+        if perfect.ece > 1e-12 then return "perfect ece=" .. perfect.ece end
+        if perfect.bins_used ~= 2 then return "bins_used=" .. perfect.bins_used end
+
+        -- certain every time, wrong every time
+        local worst = math.calibration_error({1, 1, 1}, {0, 0, 0}, 10)
+        local off = worst.ece - 1.0
+        if off < 0 then off = -off end
+        if off > 1e-12 then return "worst ece=" .. worst.ece end
+        local bin_count = #worst.bins
+        if bin_count ~= 10 then return "bins returned: " .. bin_count end
+        if worst.bins[10].count ~= 3 then return "last bin count=" .. worst.bins[10].count end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
+#[test]
+fn calibration_error_separates_ece_from_mce_via_lua() {
+    let lua = setup();
+    // A small badly-calibrated bin barely moves ECE but is exactly what MCE
+    // reports — which is why both come back.
+    let code = r#"
+        local conf, out = {}, {}
+        for i = 1, 98 do conf[i] = 0.5; out[i] = i % 2 end
+        conf[99] = 0.95; out[99] = 0
+        conf[100] = 0.95; out[100] = 0
+        local r = math.calibration_error(conf, out, 10)
+        return r.ece < 0.03 and r.mce > 0.94
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "ECE is population-weighted, MCE is not");
+}
+
+#[test]
+fn brier_score_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local exact = math.brier_score({1, 0, 1}, {1, 0, 1})
+        if exact > 1e-12 then return "exact=" .. exact end
+        local wrong = math.brier_score({1, 0}, {0, 1})
+        if wrong < 1 - 1e-12 then return "wrong=" .. wrong end
+        -- a base-rate predictor is calibrated but uninformative: ECE 0, Brier 0.25
+        local conf, out = {}, {}
+        for i = 1, 100 do conf[i] = 0.5; out[i] = i % 2 end
+        local cal = math.calibration_error(conf, out, 10)
+        local brier = math.brier_score(conf, out)
+        if cal.ece > 1e-12 then return "base rate ece=" .. cal.ece end
+        local off = brier - 0.25
+        if off < 0 then off = -off end
+        if off > 1e-12 then return "base rate brier=" .. brier end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
+#[test]
+fn calibration_rejects_malformed_input_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local _, range = pcall(math.calibration_error, {0.5, 1.5}, {0, 1}, 10)
+        local _, binary = pcall(math.calibration_error, {0.5, 0.5}, {0, 0.5}, 10)
+        local _, nobins = pcall(math.calibration_error, {0.5}, {1}, 0)
+        return tostring(range) .. " | " .. tostring(binary) .. " | " .. tostring(nobins)
+    "#;
+    let msg: String = lua.load(code).eval().unwrap();
+    assert!(msg.contains("confidences[2] is outside"), "got: {msg}");
+    assert!(msg.contains("outcomes[2] is neither 0 nor 1"), "got: {msg}");
+    assert!(msg.contains("at least one bin"), "got: {msg}");
+}
+
+#[test]
+fn hellinger_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local same = math.hellinger({0.25, 0.25, 0.5}, {0.25, 0.25, 0.5})
+        if same > 1e-12 then return "identical=" .. same end
+        local disjoint = math.hellinger({1, 0}, {0, 1})
+        if disjoint < 1 - 1e-12 then return "disjoint=" .. disjoint end
+        -- symmetric
+        local pq = math.hellinger({0.7, 0.2, 0.1}, {0.1, 0.3, 0.6})
+        local qp = math.hellinger({0.1, 0.3, 0.6}, {0.7, 0.2, 0.1})
+        if pq ~= qp then return "asymmetric: " .. pq .. " vs " .. qp end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
+#[test]
+fn wasserstein_reads_the_order_of_the_support_via_lua() {
+    let lua = setup();
+    // The distinguishing property: TVD and Hellinger cannot tell these apart,
+    // Wasserstein can.
+    let code = r#"
+        local a    = {1, 0, 0, 0, 0, 0}
+        local near = {0, 1, 0, 0, 0, 0}
+        local far  = {0, 0, 0, 0, 0, 1}
+
+        if math.tvd(a, near) ~= math.tvd(a, far) then return "tvd separated them" end
+        if math.hellinger(a, near) ~= math.hellinger(a, far) then return "hellinger did" end
+
+        local w_near = math.wasserstein_1d(a, near)
+        local w_far = math.wasserstein_1d(a, far)
+        if w_near ~= 1.0 then return "w_near=" .. w_near end
+        if w_far ~= 5.0 then return "w_far=" .. w_far end
+
+        -- an explicit support carries its own units
+        local wide = math.wasserstein_1d({1, 0, 0}, {0, 0, 1}, {0, 10, 20})
+        if wide ~= 20.0 then return "wide=" .. wide end
+
+        local _, err = pcall(math.wasserstein_1d, {0.5, 0.5}, {0.5, 0.5}, {1, 1})
+        if string.find(tostring(err), "strictly increasing", 1, true) == nil then
+            return "unordered support: " .. tostring(err)
+        end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
 // ── v0.3 Special (logsumexp, logit, expit) ──────────────
 
 #[test]

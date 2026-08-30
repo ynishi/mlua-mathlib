@@ -15,8 +15,9 @@ Provides math functions that are impractical or numerically unstable to implemen
 - **5 bootstrap intervals** (mean / paired difference, and the cluster family: mean / difference / ratio)
 - **2 multiple-comparison adjustments** (Holm-Bonferroni, Benjamini-Hochberg)
 - **2 effect sizes** (Cohen's d, Cliff's delta)
+- **2 calibration measures** (expected/maximum calibration error, Brier score)
 - **5 ranking & IR metrics** (Spearman, Kendall tau-b, NDCG, MRR, fractional rank)
-- **6 information-theoretic functions** (entropy, KL divergence, JS divergence, cross-entropy, total variation distance, mutual information)
+- **8 information-theoretic functions** (entropy, KL/JS divergence, cross-entropy, total variation, Hellinger, 1D Wasserstein, mutual information)
 
 ## Quick start
 
@@ -170,12 +171,57 @@ Input distributions must be valid probability distributions (non-negative, sum t
 | `js_divergence(p, q)` | Jensen-Shannon divergence (symmetric, bounded [0, ln 2]) |
 | `cross_entropy(p, q)` | Cross-entropy H(p, q) = -Σ pᵢ ln(qᵢ) |
 | `tvd(p, q)` | Total variation distance 0.5 Σ\|pᵢ - qᵢ\| (symmetric, bounded [0, 1]) |
+| `hellinger(p, q)` | Hellinger distance sqrt(1 - Σ sqrt(pᵢqᵢ)) — a true metric, bounded [0, 1] |
+| `wasserstein_1d(p, q [, support])` | Area between the CDFs; the only distance here that reads the support's order |
 | `mutual_information(joint)` | I(X;Y) from a joint distribution matrix |
 
 `mutual_information` takes the **joint** distribution — `joint[i][j] = P(X=i, Y=j)`,
 row-major, summing to 1 — and derives the marginals from it. Zero exactly under
 independence, bounded above by min(H(X), H(Y)). For the joint entropy on its own,
 pass the flattened matrix to `entropy`.
+
+Choosing among the distances: `tvd` and `hellinger` are both bounded metrics,
+but `tvd` reads the *difference* of two probabilities while `hellinger` reads
+their *ratio* — the latter separates two small probabilities differing by a
+large factor where the former sees only a small gap. `js_divergence` is bounded
+and symmetric but not a metric. `kl_divergence` is neither, and is the one to
+reach for when the asymmetry is the point (a reference distribution against a
+candidate).
+
+`wasserstein_1d` is different in kind: every other distance here compares `pᵢ`
+against `qᵢ` and is unchanged by permuting the bins. Wasserstein is not — it
+measures how far the mass has to travel, so it is the right choice over ordered
+outcomes and the wrong one over unordered categories, where the bin order is
+arbitrary and so would be the answer.
+
+### Calibration
+
+Whether a model's stated confidence matches how often it turns out right.
+
+| Function | Description |
+|----------|-------------|
+| `calibration_error(confidences, outcomes, bins)` | Expected and maximum calibration error. Returns `{ece, mce, bins, bins_used}` |
+| `brier_score(confidences, outcomes)` | Mean squared error of a probabilistic prediction |
+
+`confidences` are probabilities in [0, 1] and `outcomes` are 0 or 1. The
+returned `bins` array carries `{count, confidence, accuracy}` per bin, which is
+what a reliability diagram is drawn from.
+
+```lua
+local r = math.calibration_error({0.9, 0.8, 0.6, 0.55}, {1, 1, 0, 1}, 10)
+-- r.ece, r.mce, r.bins_used, r.bins[i].{count, confidence, accuracy}
+```
+
+The partition is equal-width over [0, 1] and that is not configurable. Equal-width
+and equal-frequency binning give different numbers for the same predictions, as
+does a different bin count, so an ECE is only comparable against one computed the
+same way — a flag would make it easy to compare two numbers that are not
+comparable. Empty bins contribute nothing rather than counting as a zero gap.
+
+Read the two together. Brier is a **proper scoring rule** and ECE is not: a model
+that predicts the base rate for everything is perfectly calibrated and useless,
+scoring ECE 0 and Brier 0.25 at a 50% base rate. ECE says whether the confidences
+are honest; Brier says whether they are also informative.
 
 The sum check tolerates `32 × sqrt(n) × 5.96e-8`, which covers the drift a
 distribution normalized in f32 carries once widened to f64 — a 50257-entry

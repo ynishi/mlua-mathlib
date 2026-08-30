@@ -24,6 +24,7 @@
 //! "#).exec().unwrap();
 //! ```
 
+mod calibration;
 mod cdf;
 mod distribution;
 mod hypothesis;
@@ -66,6 +67,7 @@ pub fn module(lua: &Lua) -> LuaResult<LuaTable> {
     special::register(lua, &t)?;
     cdf::register(lua, &t)?;
     resample::register(lua, &t)?;
+    calibration::register(lua, &t)?;
 
     Ok(t)
 }

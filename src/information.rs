@@ -72,6 +72,14 @@ enum DistError {
         sum: f64,
         tol: f64,
     },
+    /// A support passed to [`wasserstein_1d_impl`] was not strictly increasing.
+    /// The distance is the area between two CDFs, which needs the positions in
+    /// order to mean anything.
+    UnorderedSupport {
+        index: usize,
+        previous: f64,
+        value: f64,
+    },
 }
 
 impl std::fmt::Display for DistError {
@@ -99,6 +107,17 @@ impl std::fmt::Display for DistError {
             }
             Self::NotNormalized { side, sum, tol } => {
                 write!(f, "{side} sums to {sum}, expected 1 ± {tol:e}")
+            }
+            Self::UnorderedSupport {
+                index,
+                previous,
+                value,
+            } => {
+                write!(
+                    f,
+                    "support must be strictly increasing: support[{index}] = {value} \
+                     does not exceed {previous}"
+                )
             }
         }
     }
@@ -201,6 +220,81 @@ fn cross_entropy_impl(p: &[f64], q: &[f64]) -> Result<f64, DistError> {
             return Ok(f64::INFINITY);
         }
         acc -= pi * qi.ln();
+    }
+    Ok(acc)
+}
+
+/// Hellinger distance: `H(p,q) = sqrt(1 - Σ sqrt(p_i * q_i))`.
+///
+/// A true metric on distributions — symmetric, and it satisfies the triangle
+/// inequality, which neither KL (asymmetric) nor its square root does. Bounded
+/// `[0, 1]`: zero when the distributions are identical, one when their supports
+/// are disjoint.
+///
+/// Sits between [`tvd_impl`] and [`js_divergence_impl`] in practice. Like TVD
+/// it is bounded and metric; unlike TVD it responds to the *ratio* of the
+/// probabilities rather than their difference, so it separates two small
+/// probabilities that differ by a factor where TVD sees only a small gap.
+fn hellinger_impl(p: &[f64], q: &[f64]) -> Result<f64, DistError> {
+    validate_pair(p, q)?;
+    // Bhattacharyya coefficient. Bounded above by 1 for normalized inputs, so
+    // the argument of the root is non-negative up to rounding.
+    let bc: f64 = p.iter().zip(q.iter()).map(|(&a, &b)| (a * b).sqrt()).sum();
+    Ok((1.0 - bc).max(0.0).sqrt())
+}
+
+/// 1-Wasserstein distance between two distributions over an **ordered** support.
+///
+/// `W₁(p,q) = Σ |F_p(i) - F_q(i)| * (x_{i+1} - x_i)`, the area between the two
+/// cumulative distributions — the earth-mover's distance in one dimension.
+///
+/// # This one reads the order of the support
+///
+/// Every other distance in this module is invariant to permuting the bins: KL,
+/// JS, TVD and Hellinger compare `p_i` against `q_i` and never against `p_j`.
+/// Wasserstein does not. Moving mass one bin to the left costs less than moving
+/// it ten bins, which is what makes it the right measure over ordered outcomes
+/// (scores, ranks, token positions) and the wrong one over unordered categories
+/// — there the bin order is arbitrary and so would be the answer.
+///
+/// `support` gives the position of each bin and must be strictly increasing;
+/// omitted, the positions are `0, 1, 2, …` and the result is in bins.
+///
+/// Unlike TVD it is unbounded above: it scales with how far the mass has to
+/// travel, so the units are those of the support.
+fn wasserstein_1d_impl(p: &[f64], q: &[f64], support: Option<&[f64]>) -> Result<f64, DistError> {
+    validate_pair(p, q)?;
+    let widths: Vec<f64> = match support {
+        None => vec![1.0; p.len().saturating_sub(1)],
+        Some(x) => {
+            if x.len() != p.len() {
+                return Err(DistError::LengthMismatch {
+                    p: p.len(),
+                    q: x.len(),
+                });
+            }
+            for (i, w) in x.windows(2).enumerate() {
+                // partial_cmp rather than `<=` so a NaN position is refused
+                // too, rather than comparing false and slipping through.
+                if w[1].partial_cmp(&w[0]) != Some(std::cmp::Ordering::Greater) {
+                    return Err(DistError::UnorderedSupport {
+                        index: i + 2,
+                        previous: w[0],
+                        value: w[1],
+                    });
+                }
+            }
+            x.windows(2).map(|w| w[1] - w[0]).collect()
+        }
+    };
+
+    let mut cp = 0.0;
+    let mut cq = 0.0;
+    let mut acc = 0.0;
+    for (i, width) in widths.iter().enumerate() {
+        cp += p[i];
+        cq += q[i];
+        acc += (cp - cq).abs() * width;
     }
     Ok(acc)
 }
@@ -338,6 +432,33 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     )?;
 
     t.set(
+        "hellinger",
+        lua.create_function(|_, (p_t, q_t): (LuaTable, LuaTable)| {
+            let p = table_to_vec(&p_t)?;
+            let q = table_to_vec(&q_t)?;
+            hellinger_impl(&p, &q).map_err(|e| LuaError::runtime(format!("hellinger: {e}")))
+        })?,
+    )?;
+
+    // wasserstein_1d(p, q)            -- positions are 0, 1, 2, ...
+    // wasserstein_1d(p, q, support)   -- explicit, strictly increasing
+    t.set(
+        "wasserstein_1d",
+        lua.create_function(
+            |_, (p_t, q_t, support_t): (LuaTable, LuaTable, Option<LuaTable>)| {
+                let p = table_to_vec(&p_t)?;
+                let q = table_to_vec(&q_t)?;
+                let support = match support_t {
+                    Some(t) => Some(table_to_vec(&t)?),
+                    None => None,
+                };
+                wasserstein_1d_impl(&p, &q, support.as_deref())
+                    .map_err(|e| LuaError::runtime(format!("wasserstein_1d: {e}")))
+            },
+        )?,
+    )?;
+
+    t.set(
         "mutual_information",
         lua.create_function(|_, joint_t: LuaTable| {
             let rows = joint_t.raw_len();
@@ -455,6 +576,120 @@ mod tests {
         // p_i = 0 where q_i = 0 contributes nothing, so the result stays finite.
         let kl = kl_divergence_impl(&[1.0, 0.0], &[1.0, 0.0]).unwrap();
         assert!((kl - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn hellinger_spans_zero_to_one() {
+        let p = [0.25, 0.25, 0.5];
+        assert!(hellinger_impl(&p, &p).unwrap().abs() < 1e-12);
+        let disjoint = hellinger_impl(&[1.0, 0.0], &[0.0, 1.0]).unwrap();
+        assert!((disjoint - 1.0).abs() < 1e-12, "got {disjoint}");
+    }
+
+    #[test]
+    fn hellinger_is_symmetric_and_obeys_the_triangle_inequality() {
+        // A metric, which neither KL nor its square root is.
+        let p = [0.7, 0.2, 0.1];
+        let q = [0.1, 0.3, 0.6];
+        let r = [0.4, 0.4, 0.2];
+        let pq = hellinger_impl(&p, &q).unwrap();
+        assert!(
+            (pq - hellinger_impl(&q, &p).unwrap()).abs() < 1e-12,
+            "symmetric"
+        );
+        let pr = hellinger_impl(&p, &r).unwrap();
+        let rq = hellinger_impl(&r, &q).unwrap();
+        assert!(pq <= pr + rq + 1e-12, "{pq} > {pr} + {rq}");
+    }
+
+    #[test]
+    fn hellinger_reads_ratios_where_tvd_reads_differences() {
+        // Two pairs with the same total variation. Hellinger separates the one
+        // whose small probabilities differ by a large factor.
+        let base = [0.001, 0.499, 0.5];
+        let ratio_shift = [0.011, 0.489, 0.5]; // 11x on the small bin
+        let bulk_shift = [0.001, 0.509, 0.49]; // same 0.01 moved in the bulk
+
+        let tvd_ratio = tvd_impl(&base, &ratio_shift).unwrap();
+        let tvd_bulk = tvd_impl(&base, &bulk_shift).unwrap();
+        assert!((tvd_ratio - tvd_bulk).abs() < 1e-12, "TVD sees them alike");
+
+        let h_ratio = hellinger_impl(&base, &ratio_shift).unwrap();
+        let h_bulk = hellinger_impl(&base, &bulk_shift).unwrap();
+        assert!(h_ratio > h_bulk * 2.0, "h_ratio={h_ratio} h_bulk={h_bulk}");
+    }
+
+    #[test]
+    fn wasserstein_measures_how_far_the_mass_moved() {
+        // One unit of mass shifted by k bins costs k.
+        for k in 1..5 {
+            let mut p = vec![0.0; 6];
+            let mut q = vec![0.0; 6];
+            p[0] = 1.0;
+            q[k] = 1.0;
+            let w = wasserstein_1d_impl(&p, &q, None).unwrap();
+            assert!((w - k as f64).abs() < 1e-12, "k={k} gave {w}");
+        }
+    }
+
+    #[test]
+    fn wasserstein_reads_the_order_where_the_others_do_not() {
+        // Same mass moved one bin versus five. TVD and Hellinger report the
+        // same number for both; Wasserstein does not.
+        let a = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let near = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+        let far = [0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+
+        assert!((tvd_impl(&a, &near).unwrap() - tvd_impl(&a, &far).unwrap()).abs() < 1e-12);
+        assert!(
+            (hellinger_impl(&a, &near).unwrap() - hellinger_impl(&a, &far).unwrap()).abs() < 1e-12
+        );
+
+        let w_near = wasserstein_1d_impl(&a, &near, None).unwrap();
+        let w_far = wasserstein_1d_impl(&a, &far, None).unwrap();
+        assert!((w_near - 1.0).abs() < 1e-12, "got {w_near}");
+        assert!((w_far - 5.0).abs() < 1e-12, "got {w_far}");
+    }
+
+    #[test]
+    fn wasserstein_scales_with_the_support() {
+        // The same shift measured on a support ten times as wide costs ten
+        // times as much: the units are the support's.
+        let p = [1.0, 0.0, 0.0];
+        let q = [0.0, 0.0, 1.0];
+        let unit = wasserstein_1d_impl(&p, &q, Some(&[0.0, 1.0, 2.0])).unwrap();
+        let wide = wasserstein_1d_impl(&p, &q, Some(&[0.0, 10.0, 20.0])).unwrap();
+        assert!((unit - 2.0).abs() < 1e-12, "got {unit}");
+        assert!((wide - 20.0).abs() < 1e-12, "got {wide}");
+        // Omitting the support is the unit-spaced case.
+        assert!((wasserstein_1d_impl(&p, &q, None).unwrap() - unit).abs() < 1e-12);
+    }
+
+    #[test]
+    fn wasserstein_is_symmetric_and_zero_on_identity() {
+        let p = [0.2, 0.3, 0.5];
+        let q = [0.5, 0.1, 0.4];
+        assert!(wasserstein_1d_impl(&p, &p, None).unwrap().abs() < 1e-12);
+        let pq = wasserstein_1d_impl(&p, &q, None).unwrap();
+        let qp = wasserstein_1d_impl(&q, &p, None).unwrap();
+        assert!((pq - qp).abs() < 1e-12, "{pq} vs {qp}");
+    }
+
+    #[test]
+    fn wasserstein_refuses_an_unordered_or_mismatched_support() {
+        let p = [0.5, 0.5];
+        let q = [0.5, 0.5];
+        let err = wasserstein_1d_impl(&p, &q, Some(&[1.0, 1.0])).unwrap_err();
+        assert_eq!(
+            err,
+            DistError::UnorderedSupport {
+                index: 2,
+                previous: 1.0,
+                value: 1.0
+            }
+        );
+        assert!(err.to_string().contains("strictly increasing"));
+        assert!(wasserstein_1d_impl(&p, &q, Some(&[0.0, 1.0, 2.0])).is_err());
     }
 
     #[test]

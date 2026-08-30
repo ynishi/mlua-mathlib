@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Calibration**: 2 functions — whether a model's stated confidence matches how often it is right
+  - `calibration_error(confidences, outcomes, bins)` — expected and maximum calibration error over equal-width bins. Returns `{ece, mce, bins, bins_used}`, where `bins` carries per-bin `{count, confidence, accuracy}` so a reliability diagram can be drawn from it
+  - `brier_score(confidences, outcomes)` — mean squared error of a probabilistic prediction
+
+  The binning is fixed to equal width over `[0, 1]` rather than offered as a flag: equal-width and equal-frequency partitions give different numbers for the same predictions, so a reported ECE is only comparable against one computed the same way. An equal-frequency variant would be a separate function. Empty bins contribute nothing — a bin with no predictions has no gap to measure rather than a gap of zero — and `bins_used` reports how many were occupied.
+
+  The two are worth reading together. Brier is a proper scoring rule and ECE is not: a model that predicts the base rate for everything is perfectly calibrated (ECE 0) and useless (Brier 0.25 at a 50% base rate).
+- **Information theory**: 2 distances
+  - `hellinger(p, q)` — `sqrt(1 - Σ sqrt(p_i q_i))`, a true metric on distributions (symmetric and obeying the triangle inequality, which KL does not). Bounded `[0, 1]`. Responds to the *ratio* of two probabilities where `tvd` responds to their difference, so it separates small probabilities that differ by a large factor
+  - `wasserstein_1d(p, q [, support])` — the area between the two cumulative distributions, in one dimension. **The only distance here that reads the order of the support**: moving mass one bin costs less than moving it ten, which makes it right for ordered outcomes (scores, ranks, positions) and wrong for unordered categories. `support` must be strictly increasing; omitted, positions are `0, 1, 2, …` and the result is in bins. Unbounded above, in the units of the support
+
 ### Changed
 
 ### Deprecated
