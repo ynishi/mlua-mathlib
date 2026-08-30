@@ -611,6 +611,50 @@ fn wilson_ci_basic() {
 }
 
 #[test]
+fn wilson_ci_contains_the_estimate_at_the_endpoints_via_lua() {
+    let lua = setup();
+    // In exact arithmetic the interval touches p̂ at 0 and 1; in floating point
+    // the residue lands a few ulp off, which without the clamp hands the caller
+    // a bound excluding its own estimate. n=10 and n=2000 are two of the
+    // lengths where the upper end fell short.
+    let code = r#"
+        for _, n in ipairs({1, 2, 3, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000}) do
+            local hi = math.wilson_ci(n, n, 0.95)
+            if hi.upper < 1.0 then return "upper < 1 at n=" .. n end
+            if hi.lower > 1.0 then return "lower > p_hat at n=" .. n end
+
+            local lo = math.wilson_ci(0, n, 0.95)
+            if lo.lower > 0.0 then return "lower > 0 at n=" .. n end
+            if lo.upper < 0.0 then return "upper < p_hat at n=" .. n end
+        end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
+#[test]
+fn wilson_ci_still_brackets_interior_estimates_via_lua() {
+    let lua = setup();
+    // The clamp must not collapse an interior interval onto p̂.
+    let code = r#"
+        for k = 1, 99 do
+            local ci = math.wilson_ci(k, 100, 0.95)
+            local p = k / 100
+            if not (ci.lower <= p and p <= ci.upper) then
+                return "does not contain p_hat at k=" .. k
+            end
+            if not (ci.lower < ci.upper) then
+                return "collapsed to a point at k=" .. k
+            end
+        end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
+#[test]
 fn log_normalize_basic() {
     let lua = setup();
     let code = r#"

@@ -433,9 +433,15 @@ fn register_transforms(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
             let margin =
                 (z * ((p_hat * (1.0 - p_hat) + z2 / (4.0 * total)) / total).sqrt()) / denom;
 
+            // Clamped to [0, 1] as a probability, and to p̂ so the interval
+            // always contains the estimate it brackets. In exact arithmetic it
+            // already does — at p̂ = 1 the two halves of the numerator sum to
+            // the denominator, so the upper end is exactly 1 — but the residue
+            // lands a few ulp short in floating point, which would hand a
+            // caller reading `lower` a bound that excludes its own estimate.
             let result = lua.create_table()?;
-            result.set("lower", (center - margin).max(0.0))?;
-            result.set("upper", (center + margin).min(1.0))?;
+            result.set("lower", (center - margin).max(0.0).min(p_hat))?;
+            result.set("upper", (center + margin).min(1.0).max(p_hat))?;
             result.set("center", center)?;
             Ok(result)
         })?,
