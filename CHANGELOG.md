@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.6.0] - 2026-08-30
+
+### Added
+
 - **Resampling**: 2 functions, the flat-series counterparts of the cluster family
   - `bootstrap_mean(values, draws, seed [, confidence])` — one observation per resampling unit, for independent measurements
   - `paired_bootstrap_diff(xs, ys, draws, seed [, confidence])` — `xs[i]` and `ys[i]` are two measurements of the same item (one prompt scored by two models). The difference is taken per pair before resampling, so whatever the items have in common cancels
@@ -22,16 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `mutual_information(joint)` — `I(X;Y)` in nats, from a row-major joint distribution (`joint[i][j] = P(X=i, Y=j)`, summing to 1). The marginals are derived from it. Everything else in this module takes a single distribution, so nothing could express a relationship between two variables
 
   The joint is divided through by its observed sum rather than assumed to be exactly 1. Since the tolerance admits drift by design (callers normalize in f32), a joint summing slightly below 1 would otherwise report a positive mutual information for variables that are exactly independent.
-
-### Changed
-
-### Deprecated
-
-### Removed
-
-### Fixed
-
-### Security
 
 ## [0.5.0] - 2026-08-30
 
@@ -166,7 +170,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `iqr(values)` — interquartile range
   - `softmax(values)` — numerically stable softmax
 
-[Unreleased]: https://github.com/ynishi/mlua-mathlib/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ynishi/mlua-mathlib/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.6.0
 [0.5.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.5.0
 [0.4.1]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.4.1
 [0.4.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.4.0
