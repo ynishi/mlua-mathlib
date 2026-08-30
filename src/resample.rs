@@ -2,7 +2,7 @@ use mlua::prelude::*;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use crate::stats::percentile_impl;
+use crate::stats::{percentile_impl, table_to_vec};
 
 /// Confidence level used when the caller does not name one.
 const DEFAULT_CONFIDENCE: f64 = 0.95;
@@ -223,15 +223,35 @@ fn assert_same_clusters(a: &[Vec<f64>], b: &[Vec<f64>], names: (&str, &str)) -> 
     Ok(())
 }
 
-fn interval_to_table(lua: &Lua, iv: &Interval) -> LuaResult<LuaTable> {
+/// `unit_key` names what was resampled — `clusters` for the cluster family,
+/// `observations` where each unit is a single measurement.
+fn interval_to_table(lua: &Lua, iv: &Interval, unit_key: &str) -> LuaResult<LuaTable> {
     let t = lua.create_table()?;
     t.set("point", iv.point)?;
     t.set("lower", iv.lower)?;
     t.set("upper", iv.upper)?;
     t.set("draws_used", iv.draws_used)?;
     t.set("undefined_draws", iv.undefined_draws)?;
-    t.set("clusters", iv.clusters)?;
+    t.set(unit_key, iv.clusters)?;
     Ok(t)
+}
+
+/// Resample a flat series, one observation per unit.
+///
+/// The cluster machinery with every cluster holding a single measurement.
+/// Correct when the observations are independent; where they arrive in
+/// correlated groups this understates the spread and the cluster family is
+/// what applies.
+fn bootstrap_values(
+    values: &[f64],
+    draws: usize,
+    seed: u64,
+    confidence: f64,
+) -> Result<Interval, String> {
+    let tallies: Vec<Tally> = values.iter().map(|&v| Tally { sum: v, n: 1 }).collect();
+    cluster_bootstrap(tallies.len(), draws, seed, confidence, |draw| {
+        tally_over(&tallies, draw).mean()
+    })
 }
 
 pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
@@ -250,7 +270,7 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                     |draw| tally_over(&tallies, draw).mean(),
                 )
                 .map_err(|e| LuaError::runtime(format!("cluster_bootstrap_mean: {e}")))?;
-                interval_to_table(lua, &iv)
+                interval_to_table(lua, &iv, "clusters")
             },
         )?,
     )?;
@@ -284,7 +304,7 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                     |draw| Some(tally_over(&ta, draw).mean()? - tally_over(&tb, draw).mean()?),
                 )
                 .map_err(|e| LuaError::runtime(format!("cluster_bootstrap_diff: {e}")))?;
-                interval_to_table(lua, &iv)
+                interval_to_table(lua, &iv, "clusters")
             },
         )?,
     )?;
@@ -327,7 +347,69 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
                     },
                 )
                 .map_err(|e| LuaError::runtime(format!("cluster_bootstrap_ratio: {e}")))?;
-                interval_to_table(lua, &iv)
+                interval_to_table(lua, &iv, "clusters")
+            },
+        )?,
+    )?;
+
+    // bootstrap_mean(values, draws, seed [, confidence])
+    //
+    // One observation per resampling unit. Use the cluster family instead when
+    // the observations arrive in correlated groups.
+    t.set(
+        "bootstrap_mean",
+        lua.create_function(
+            |lua, (values_t, draws, seed, confidence): (LuaTable, usize, u64, Option<f64>)| {
+                let values = table_to_vec(&values_t)?;
+                let iv = bootstrap_values(
+                    &values,
+                    draws,
+                    seed,
+                    confidence.unwrap_or(DEFAULT_CONFIDENCE),
+                )
+                .map_err(|e| LuaError::runtime(format!("bootstrap_mean: {e}")))?;
+                interval_to_table(lua, &iv, "observations")
+            },
+        )?,
+    )?;
+
+    // paired_bootstrap_diff(xs, ys, draws, seed [, confidence])
+    //
+    // `xs[i]` and `ys[i]` are two measurements of the same item — the same
+    // prompt scored by two models, the same position judged twice. The
+    // difference is taken per pair before resampling, so whatever the items
+    // have in common cancels and the interval is on the difference itself.
+    // Two independent groups need two separate `bootstrap_mean` calls.
+    t.set(
+        "paired_bootstrap_diff",
+        lua.create_function(
+            |lua,
+             (xs_t, ys_t, draws, seed, confidence): (
+                LuaTable,
+                LuaTable,
+                usize,
+                u64,
+                Option<f64>,
+            )| {
+                let xs = table_to_vec(&xs_t)?;
+                let ys = table_to_vec(&ys_t)?;
+                if xs.len() != ys.len() {
+                    return Err(LuaError::runtime(format!(
+                        "paired_bootstrap_diff: xs and ys must be paired element by element: \
+                         {} vs {}",
+                        xs.len(),
+                        ys.len()
+                    )));
+                }
+                let diffs: Vec<f64> = xs.iter().zip(ys.iter()).map(|(a, b)| a - b).collect();
+                let iv = bootstrap_values(
+                    &diffs,
+                    draws,
+                    seed,
+                    confidence.unwrap_or(DEFAULT_CONFIDENCE),
+                )
+                .map_err(|e| LuaError::runtime(format!("paired_bootstrap_diff: {e}")))?;
+                interval_to_table(lua, &iv, "observations")
             },
         )?,
     )?;
@@ -546,6 +628,48 @@ mod tests {
         // The draw naming cluster 1 twice has a zero denominator.
         assert!(iv.undefined_draws > 0);
         assert!(iv.lower.is_finite() && iv.upper.is_finite());
+    }
+
+    #[test]
+    fn a_flat_series_resamples_one_observation_per_unit() {
+        let iv =
+            bootstrap_values(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 2000, 1, 0.95).unwrap();
+        assert!((iv.point - 4.5).abs() < 1e-12);
+        assert!(iv.lower < iv.point && iv.point < iv.upper);
+        assert_eq!(iv.clusters, 8, "each observation is its own unit");
+        assert_eq!(iv.undefined_draws, 0, "a flat series has no empty units");
+    }
+
+    #[test]
+    fn a_flat_series_agrees_with_one_observation_per_cluster() {
+        // bootstrap_values is the cluster machinery with singleton clusters, so
+        // the two must agree bit for bit at the same seed.
+        let values = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0];
+        let flat = bootstrap_values(&values, 500, 21, 0.95).unwrap();
+        let clustered =
+            cluster_bootstrap(6, 500, 21, 0.95, mean_of(&one_per_cluster(&values))).unwrap();
+        assert_eq!(flat.lower.to_bits(), clustered.lower.to_bits());
+        assert_eq!(flat.upper.to_bits(), clustered.upper.to_bits());
+    }
+
+    #[test]
+    fn pairing_cancels_what_the_items_share() {
+        // Both series carry a large per-item effect; the difference is a
+        // constant 2. Pairing removes the shared variation, so the paired
+        // interval collapses while either side alone is wide.
+        let xs = [10.0, 50.0, 90.0, 130.0, 170.0];
+        let ys: Vec<f64> = xs.iter().map(|v| v - 2.0).collect();
+        let diffs: Vec<f64> = xs.iter().zip(ys.iter()).map(|(a, b)| a - b).collect();
+
+        let paired = bootstrap_values(&diffs, 2000, 4, 0.95).unwrap();
+        assert!((paired.point - 2.0).abs() < 1e-12);
+        assert!((paired.upper - paired.lower).abs() < 1e-12);
+
+        let side = bootstrap_values(&xs, 2000, 4, 0.95).unwrap();
+        assert!(
+            side.upper - side.lower > 20.0,
+            "the unpaired side is wide: {side:?}"
+        );
     }
 
     #[test]

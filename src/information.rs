@@ -187,6 +187,83 @@ fn cross_entropy_impl(p: &[f64], q: &[f64]) -> Result<f64, DistError> {
     Ok(acc)
 }
 
+/// Mutual information `I(X;Y) = Σ p(x,y) * ln(p(x,y) / (p(x) * p(y)))`, in nats.
+///
+/// Takes the **joint** distribution as a row-major matrix — `joint[i][j]` is
+/// `P(X = i, Y = j)` and the whole matrix sums to 1. The marginals are derived
+/// from it, which is the point: everything the other functions here take is a
+/// single distribution, so nothing could express a relationship between two
+/// variables.
+///
+/// Zero exactly when the variables are independent, and bounded above by
+/// `min(H(X), H(Y))`. Cells with `p(x,y) = 0` contribute nothing (the
+/// `0·log 0 := 0` convention), and a marginal of zero can only arise where the
+/// whole row or column is zero, so no term divides by zero.
+///
+/// The joint entropy, if the caller wants it separately, is `entropy` over the
+/// flattened matrix.
+fn mutual_information_impl(joint: &[Vec<f64>]) -> Result<f64, DistError> {
+    if joint.is_empty() {
+        return Err(DistError::Empty { side: "joint" });
+    }
+    let cols = joint[0].len();
+    if cols == 0 {
+        return Err(DistError::Empty { side: "joint" });
+    }
+    for (i, row) in joint.iter().enumerate() {
+        if row.len() != cols {
+            return Err(DistError::LengthMismatch {
+                p: cols,
+                q: row.len(),
+            });
+        }
+        for (j, &v) in row.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(DistError::NonFinite {
+                    side: "joint",
+                    index: i * cols + j + 1,
+                    value: v,
+                });
+            }
+            if v < 0.0 {
+                return Err(DistError::Negative {
+                    side: "joint",
+                    index: i * cols + j + 1,
+                    value: v,
+                });
+            }
+        }
+    }
+
+    let cells = joint.len() * cols;
+    let sum: f64 = joint.iter().flat_map(|r| r.iter()).sum();
+    let tol = norm_tol(cells);
+    if (sum - 1.0).abs() > tol {
+        return Err(DistError::NotNormalized {
+            side: "joint",
+            sum,
+            tol,
+        });
+    }
+
+    let row_marginals: Vec<f64> = joint.iter().map(|r| r.iter().sum()).collect();
+    let col_marginals: Vec<f64> = (0..cols)
+        .map(|j| joint.iter().map(|r| r[j]).sum())
+        .collect();
+
+    let mut acc = 0.0;
+    for (i, row) in joint.iter().enumerate() {
+        for (j, &p_xy) in row.iter().enumerate() {
+            if p_xy > 0.0 {
+                // Both marginals are >= p_xy > 0 here, so neither divides by zero.
+                acc += p_xy * (p_xy / (row_marginals[i] * col_marginals[j])).ln();
+            }
+        }
+    }
+    // Cancellation can leave a tiny negative where the truth is exactly zero.
+    Ok(acc.max(0.0))
+}
+
 /// Total variation distance: TVD(p, q) = 0.5 * Σ|p_i - q_i|
 /// Symmetric: the share of probability mass the two distributions disagree on.
 /// Bounded [0, 1] for exactly normalized inputs; since [`validate`] admits a sum
@@ -231,6 +308,35 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
             let p = table_to_vec(&p_t)?;
             let q = table_to_vec(&q_t)?;
             cross_entropy_impl(&p, &q).map_err(|e| LuaError::runtime(format!("cross_entropy: {e}")))
+        })?,
+    )?;
+
+    t.set(
+        "mutual_information",
+        lua.create_function(|_, joint_t: LuaTable| {
+            let rows = joint_t.raw_len();
+            if rows == 0 {
+                return Err(LuaError::runtime("mutual_information: joint is empty"));
+            }
+            let mut joint = Vec::with_capacity(rows);
+            for i in 1..=rows {
+                let row_t: LuaTable = joint_t.raw_get(i).map_err(|_| {
+                    LuaError::runtime(format!("mutual_information: joint[{i}] is not a table"))
+                })?;
+                let cols = row_t.raw_len();
+                let mut row = Vec::with_capacity(cols);
+                for j in 1..=cols {
+                    let v: f64 = row_t.raw_get(j).map_err(|_| {
+                        LuaError::runtime(format!(
+                            "mutual_information: joint[{i}][{j}] is not a number"
+                        ))
+                    })?;
+                    row.push(v);
+                }
+                joint.push(row);
+            }
+            mutual_information_impl(&joint)
+                .map_err(|e| LuaError::runtime(format!("mutual_information: {e}")))
         })?,
     )?;
 
@@ -323,6 +429,67 @@ mod tests {
         // p_i = 0 where q_i = 0 contributes nothing, so the result stays finite.
         let kl = kl_divergence_impl(&[1.0, 0.0], &[1.0, 0.0]).unwrap();
         assert!((kl - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn mutual_information_is_zero_under_independence() {
+        // p(x,y) = p(x)q(y) exactly, so knowing one says nothing about the other.
+        let px = [0.3, 0.7];
+        let qy = [0.4, 0.6];
+        let joint: Vec<Vec<f64>> = px
+            .iter()
+            .map(|&a| qy.iter().map(|&b| a * b).collect())
+            .collect();
+        let mi = mutual_information_impl(&joint).unwrap();
+        assert!(mi.abs() < 1e-12, "got {mi}");
+    }
+
+    #[test]
+    fn mutual_information_of_a_perfect_dependence_is_the_marginal_entropy() {
+        // Y is a copy of X: the diagonal carries everything, so I(X;Y) = H(X).
+        let joint = vec![vec![0.25, 0.0], vec![0.0, 0.75]];
+        let mi = mutual_information_impl(&joint).unwrap();
+        let h_x = entropy_impl(&[0.25, 0.75]).unwrap();
+        assert!((mi - h_x).abs() < 1e-12, "mi={mi}, H(X)={h_x}");
+    }
+
+    #[test]
+    fn mutual_information_is_bounded_by_the_smaller_marginal_entropy() {
+        let joint = vec![vec![0.1, 0.2, 0.05], vec![0.15, 0.3, 0.2]];
+        let mi = mutual_information_impl(&joint).unwrap();
+        let h_rows = entropy_impl(&[0.35, 0.65]).unwrap();
+        let h_cols = entropy_impl(&[0.25, 0.5, 0.25]).unwrap();
+        assert!(mi >= 0.0, "never negative: {mi}");
+        assert!(
+            mi <= h_rows.min(h_cols) + 1e-12,
+            "mi={mi} exceeds the bound"
+        );
+    }
+
+    #[test]
+    fn mutual_information_is_symmetric_under_transpose() {
+        let joint = vec![vec![0.1, 0.2, 0.05], vec![0.15, 0.3, 0.2]];
+        let transposed: Vec<Vec<f64>> = (0..3)
+            .map(|j| (0..2).map(|i| joint[i][j]).collect())
+            .collect();
+        let a = mutual_information_impl(&joint).unwrap();
+        let b = mutual_information_impl(&transposed).unwrap();
+        assert!((a - b).abs() < 1e-12, "{a} vs {b}");
+    }
+
+    #[test]
+    fn mutual_information_rejects_a_ragged_or_unnormalized_matrix() {
+        let ragged = vec![vec![0.5, 0.5], vec![0.0]];
+        assert!(matches!(
+            mutual_information_impl(&ragged).unwrap_err(),
+            DistError::LengthMismatch { .. }
+        ));
+        let short = vec![vec![0.2, 0.2], vec![0.2, 0.2]];
+        assert!(matches!(
+            mutual_information_impl(&short).unwrap_err(),
+            DistError::NotNormalized { side: "joint", .. }
+        ));
+        assert!(mutual_information_impl(&[]).is_err());
     }
 
     #[test]

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Resampling**: 2 functions, the flat-series counterparts of the cluster family
+  - `bootstrap_mean(values, draws, seed [, confidence])` — one observation per resampling unit, for independent measurements
+  - `paired_bootstrap_diff(xs, ys, draws, seed [, confidence])` — `xs[i]` and `ys[i]` are two measurements of the same item (one prompt scored by two models). The difference is taken per pair before resampling, so whatever the items have in common cancels
+
+  Both return `{point, lower, upper, draws_used, undefined_draws, observations}` — `observations` where the cluster family reports `clusters`.
+- **Hypothesis testing**: 1 function
+  - `permutation_test(xs, ys, draws, seed [, {alternative = "two_sided" | "greater" | "less"}])` — shuffles the pooled observations and counts how often the reshuffled difference in means is at least as extreme as the observed one. Where the other tests assume a shape (normality for Welch's t, continuity for Mann-Whitney and Kolmogorov-Smirnov), this assumes only that the labels are exchangeable under the null. Returns `{observed, p_value, extreme_draws, draws}`
+
+  The p-value is `(1 + extreme) / (1 + draws)`, not `extreme / draws`: the observed arrangement is itself one of the permutations under the null, and counting it keeps the estimate from reaching exactly zero — a claim no finite number of draws can support.
+- **Information theory**: 1 function
+  - `mutual_information(joint)` — `I(X;Y)` in nats, from a row-major joint distribution (`joint[i][j] = P(X=i, Y=j)`, summing to 1). The marginals are derived from it. Everything else in this module takes a single distribution, so nothing could express a relationship between two variables
+
 ### Changed
 
 ### Deprecated

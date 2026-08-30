@@ -1,7 +1,14 @@
 use mlua::prelude::*;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use statrs::distribution::{ContinuousCDF, StudentsT};
 
 use crate::stats::{mean_impl, sort_floats, table_to_vec, variance_impl};
+
+/// Ceiling on permutation draws, mirroring the resampling cap: `draws` and
+/// `seed` are adjacent bare numbers and Lua has no named arguments.
+const MAX_PERMUTATION_DRAWS: usize = 10_000_000;
 
 /// Welch's t-test (unequal variances).
 /// Returns {t_stat, df, p_value (two-tailed)}.
@@ -225,6 +232,94 @@ fn ks_test_impl(xs: &[f64], ys: &[f64]) -> Result<(f64, f64), &'static str> {
     Ok((d_max, p_value))
 }
 
+/// Which tail a permutation test counts against.
+#[derive(Clone, Copy, PartialEq)]
+enum Alternative {
+    /// `|permuted| >= |observed|` — a difference in either direction.
+    TwoSided,
+    /// `permuted >= observed` — xs greater than ys.
+    Greater,
+    /// `permuted <= observed` — xs less than ys.
+    Less,
+}
+
+impl Alternative {
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "two_sided" => Ok(Self::TwoSided),
+            "greater" => Ok(Self::Greater),
+            "less" => Ok(Self::Less),
+            other => Err(format!(
+                "alternative must be \"two_sided\", \"greater\" or \"less\", got \"{other}\""
+            )),
+        }
+    }
+
+    fn counts(self, permuted: f64, observed: f64) -> bool {
+        match self {
+            Self::TwoSided => permuted.abs() >= observed.abs(),
+            Self::Greater => permuted >= observed,
+            Self::Less => permuted <= observed,
+        }
+    }
+}
+
+/// Permutation test on the difference in means.
+///
+/// Shuffles the pooled observations, splits them back at the original group
+/// sizes, and counts how often the reshuffled difference is at least as
+/// extreme as the observed one. Where the other tests here assume a shape —
+/// normality for Welch's t, continuity for Mann-Whitney and Kolmogorov-Smirnov
+/// — this assumes only that the labels are exchangeable under the null.
+///
+/// # The p-value is `(1 + extreme) / (1 + draws)`
+///
+/// Not `extreme / draws`. The observed arrangement is itself one of the
+/// permutations under the null, so counting it keeps the test valid; without
+/// it the estimate can reach exactly zero, which claims more than any finite
+/// number of draws can support. The floor is therefore `1 / (1 + draws)`
+/// [Phipson & Smyth 2010].
+fn permutation_test_impl(
+    xs: &[f64],
+    ys: &[f64],
+    draws: usize,
+    seed: u64,
+    alternative: Alternative,
+) -> Result<(f64, f64, usize), String> {
+    if xs.is_empty() || ys.is_empty() {
+        return Err("both groups must be non-empty".into());
+    }
+    if draws == 0 {
+        return Err("needs at least one draw".into());
+    }
+    if draws > MAX_PERMUTATION_DRAWS {
+        return Err(format!(
+            "draws is capped at {MAX_PERMUTATION_DRAWS}, got {draws}; check the argument order — \
+             it is (xs, ys, draws, seed)"
+        ));
+    }
+
+    let n1 = xs.len();
+    let observed = mean_impl(xs) - mean_impl(ys);
+
+    let mut pool: Vec<f64> = Vec::with_capacity(n1 + ys.len());
+    pool.extend_from_slice(xs);
+    pool.extend_from_slice(ys);
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut extreme = 0usize;
+    for _ in 0..draws {
+        pool.shuffle(&mut rng);
+        let permuted = mean_impl(&pool[..n1]) - mean_impl(&pool[n1..]);
+        if alternative.counts(permuted, observed) {
+            extreme += 1;
+        }
+    }
+
+    let p_value = (1 + extreme) as f64 / (1 + draws) as f64;
+    Ok((observed, p_value, extreme))
+}
+
 /// Reject a p-value vector that is empty or holds a value outside [0, 1].
 fn validate_p_values(p: &[f64]) -> Result<(), String> {
     if p.is_empty() {
@@ -411,6 +506,39 @@ pub(crate) fn register(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
         })?,
     )?;
 
+    // permutation_test(xs, ys, draws, seed)
+    // permutation_test(xs, ys, draws, seed, {alternative = "greater"})
+    t.set(
+        "permutation_test",
+        lua.create_function(
+            |lua,
+             (xs_t, ys_t, draws, seed, opts): (
+                LuaTable,
+                LuaTable,
+                usize,
+                u64,
+                Option<LuaTable>,
+            )| {
+                let xs = table_to_vec(&xs_t)?;
+                let ys = table_to_vec(&ys_t)?;
+                let alternative = match opts.and_then(|o| o.get::<String>("alternative").ok()) {
+                    Some(s) => Alternative::parse(&s)
+                        .map_err(|e| LuaError::runtime(format!("permutation_test: {e}")))?,
+                    None => Alternative::TwoSided,
+                };
+                let (observed, p_value, extreme) =
+                    permutation_test_impl(&xs, &ys, draws, seed, alternative)
+                        .map_err(|e| LuaError::runtime(format!("permutation_test: {e}")))?;
+                let result = lua.create_table()?;
+                result.set("observed", observed)?;
+                result.set("p_value", p_value)?;
+                result.set("extreme_draws", extreme)?;
+                result.set("draws", draws)?;
+                Ok(result)
+            },
+        )?,
+    )?;
+
     t.set(
         "holm",
         lua.create_function(|_, p_t: LuaTable| {
@@ -559,6 +687,79 @@ mod tests {
             (d - 1.0).abs() < 1e-10,
             "d={d}, completely separated distributions should have d≈1"
         );
+    }
+
+    // ── permutation test ────────────────────────────────────
+
+    #[test]
+    fn permutation_finds_a_separated_pair_significant() {
+        let low = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let high = [11.0, 12.0, 13.0, 14.0, 15.0];
+        let (obs, p, _) =
+            permutation_test_impl(&high, &low, 2000, 1, Alternative::TwoSided).unwrap();
+        assert!((obs - 10.0).abs() < 1e-12);
+        // No reshuffle of these ten values separates them as cleanly, so only
+        // the floor remains.
+        assert!(p < 0.01, "got p={p}");
+    }
+
+    #[test]
+    fn permutation_finds_interleaved_groups_unremarkable() {
+        let a = [1.0, 3.0, 5.0, 7.0, 9.0];
+        let b = [2.0, 4.0, 6.0, 8.0, 10.0];
+        let (_, p, _) = permutation_test_impl(&a, &b, 2000, 2, Alternative::TwoSided).unwrap();
+        assert!(p > 0.2, "got p={p}");
+    }
+
+    #[test]
+    fn the_p_value_never_reaches_zero() {
+        // (1 + extreme) / (1 + draws), so the floor is 1/(1+draws). Without the
+        // correction a perfectly separated pair would report exactly 0.
+        let low = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let high = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0];
+        let (_, p, extreme) =
+            permutation_test_impl(&high, &low, 999, 3, Alternative::TwoSided).unwrap();
+        let floor = 1.0 / 1000.0;
+        assert!(p >= floor, "p can never fall below 1/(1+draws): {p}");
+        assert!(
+            (p - (1 + extreme) as f64 / 1000.0).abs() < 1e-12,
+            "p is exactly (1+extreme)/(1+draws): p={p}, extreme={extreme}"
+        );
+        // Only the two fully separated arrangements out of C(12,6)=924 reach
+        // the observed difference, so p stays near the floor without touching
+        // zero.
+        assert!(p < 0.02, "got p={p}, extreme={extreme}");
+    }
+
+    #[test]
+    fn a_one_sided_alternative_reads_the_named_direction() {
+        let low = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let high = [6.0, 7.0, 8.0, 9.0, 10.0];
+        // high - low is positive, so "greater" is the supported direction and
+        // "less" is not.
+        let (_, p_greater, _) =
+            permutation_test_impl(&high, &low, 2000, 4, Alternative::Greater).unwrap();
+        let (_, p_less, _) =
+            permutation_test_impl(&high, &low, 2000, 4, Alternative::Less).unwrap();
+        assert!(p_greater < 0.05, "got {p_greater}");
+        assert!(p_less > 0.95, "got {p_less}");
+    }
+
+    #[test]
+    fn permutation_is_reproducible_and_refuses_bad_input() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [4.0, 5.0, 6.0];
+        let first = permutation_test_impl(&a, &b, 500, 7, Alternative::TwoSided).unwrap();
+        let again = permutation_test_impl(&a, &b, 500, 7, Alternative::TwoSided).unwrap();
+        assert_eq!(first.1.to_bits(), again.1.to_bits());
+
+        assert!(permutation_test_impl(&[], &b, 100, 1, Alternative::TwoSided).is_err());
+        assert!(permutation_test_impl(&a, &b, 0, 1, Alternative::TwoSided).is_err());
+        let err =
+            permutation_test_impl(&a, &b, MAX_PERMUTATION_DRAWS + 1, 1, Alternative::TwoSided)
+                .unwrap_err();
+        assert!(err.contains("argument order"), "got: {err}");
+        assert!(Alternative::parse("sideways").is_err());
     }
 
     // ── multiple-comparison adjustment ──────────────────────

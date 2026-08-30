@@ -1133,6 +1133,122 @@ fn effect_sizes_via_lua() {
     assert_eq!(res, "ok");
 }
 
+// ── v0.6 Permutation / paired bootstrap / mutual information ──
+
+#[test]
+fn bootstrap_mean_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local ci = math.bootstrap_mean({1, 2, 3, 4, 5, 6, 7, 8}, 2000, 1)
+        local ok = ci.point > 4.49 and ci.point < 4.51
+            and ci.lower < ci.point and ci.point < ci.upper
+            and ci.observations == 8
+            and ci.draws_used == 2000
+        if not ok then
+            return string.format("point=%f lower=%f upper=%f obs=%d",
+                ci.point, ci.lower, ci.upper, ci.observations)
+        end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
+#[test]
+fn paired_bootstrap_diff_cancels_shared_variation_via_lua() {
+    let lua = setup();
+    // Both series carry a large per-item effect and differ by a constant 2.
+    // Pairing removes what they share; the unpaired side stays wide.
+    let code = r#"
+        local xs = {10, 50, 90, 130, 170}
+        local ys = {8, 48, 88, 128, 168}
+        local paired = math.paired_bootstrap_diff(xs, ys, 2000, 4)
+        local side = math.bootstrap_mean(xs, 2000, 4)
+        local width = paired.upper - paired.lower
+        local off = paired.point - 2.0
+        if off < 0 then off = -off end
+        return width < 1e-9 and off < 1e-9 and (side.upper - side.lower) > 20
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(ok, "pairing must collapse a constant difference");
+}
+
+#[test]
+fn paired_bootstrap_diff_requires_equal_lengths_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local _, err = pcall(math.paired_bootstrap_diff, {1, 2, 3}, {1, 2}, 100, 1)
+        return tostring(err)
+    "#;
+    let err: String = lua.load(code).eval().unwrap();
+    assert!(err.contains("paired element by element"), "got: {err}");
+}
+
+#[test]
+fn permutation_test_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local low = {1, 2, 3, 4, 5}
+        local high = {11, 12, 13, 14, 15}
+        local sep = math.permutation_test(high, low, 2000, 1)
+        if sep.p_value >= 0.01 then return "separated p=" .. sep.p_value end
+        if sep.observed < 9.99 or sep.observed > 10.01 then return "observed=" .. sep.observed end
+        if sep.p_value <= 0 then return "p must never reach zero" end
+
+        local a = {1, 3, 5, 7, 9}
+        local b = {2, 4, 6, 8, 10}
+        local mixed = math.permutation_test(a, b, 2000, 2)
+        if mixed.p_value <= 0.2 then return "interleaved p=" .. mixed.p_value end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
+#[test]
+fn permutation_test_alternative_option_via_lua() {
+    let lua = setup();
+    let code = r#"
+        local low = {1, 2, 3, 4, 5}
+        local high = {6, 7, 8, 9, 10}
+        local g = math.permutation_test(high, low, 2000, 4, {alternative = "greater"})
+        local l = math.permutation_test(high, low, 2000, 4, {alternative = "less"})
+        local _, err = pcall(math.permutation_test, high, low, 100, 1, {alternative = "sideways"})
+        return g.p_value < 0.05 and l.p_value > 0.95
+            and string.find(tostring(err), "two_sided", 1, true) ~= nil
+    "#;
+    let ok: bool = lua.load(code).eval().unwrap();
+    assert!(
+        ok,
+        "one-sided alternatives and the rejection of an unknown one"
+    );
+}
+
+#[test]
+fn mutual_information_via_lua() {
+    let lua = setup();
+    let code = r#"
+        -- independent: p(x,y) = p(x)q(y)
+        local indep = math.mutual_information({{0.12, 0.18}, {0.28, 0.42}})
+        if indep > 1e-9 then return "independent mi=" .. indep end
+
+        -- a perfect copy: I(X;Y) = H(X)
+        local dep = math.mutual_information({{0.25, 0.0}, {0.0, 0.75}})
+        local hx = math.entropy({0.25, 0.75})
+        local off = dep - hx
+        if off < 0 then off = -off end
+        if off > 1e-9 then return "dep=" .. dep .. " hx=" .. hx end
+
+        local _, err = pcall(math.mutual_information, {{0.5, 0.5}, {0.0}})
+        if string.find(tostring(err), "length mismatch", 1, true) == nil then
+            return "ragged: " .. tostring(err)
+        end
+        return "ok"
+    "#;
+    let res: String = lua.load(code).eval().unwrap();
+    assert_eq!(res, "ok");
+}
+
 // ── v0.3 Special (logsumexp, logit, expit) ──────────────
 
 #[test]

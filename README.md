@@ -11,12 +11,12 @@ Provides math functions that are impractical or numerically unstable to implemen
 - **Special functions** via `statrs` (erf, gamma, beta, digamma, factorial)
 - **CDF/PPF** for Normal, Beta, Gamma, Poisson distributions
 - **16 descriptive & time-series statistics** with numerical stability (Welford variance, interpolated percentiles, Wilson CI, stable softmax, moving average, EWMA, autocorrelation)
-- **4 hypothesis tests** (Welch's t, Mann-Whitney U, chi-squared, Kolmogorov-Smirnov)
-- **3 cluster bootstrap intervals** (mean / difference / ratio, resampling correlated groups)
+- **5 hypothesis tests** (Welch's t, Mann-Whitney U, chi-squared, Kolmogorov-Smirnov, permutation)
+- **5 bootstrap intervals** (mean / paired difference, and the cluster family: mean / difference / ratio)
 - **2 multiple-comparison adjustments** (Holm-Bonferroni, Benjamini-Hochberg)
 - **2 effect sizes** (Cohen's d, Cliff's delta)
 - **5 ranking & IR metrics** (Spearman, Kendall tau-b, NDCG, MRR, fractional rank)
-- **5 information-theoretic functions** (entropy, KL divergence, JS divergence, cross-entropy, total variation distance)
+- **6 information-theoretic functions** (entropy, KL divergence, JS divergence, cross-entropy, total variation distance, mutual information)
 
 ## Quick start
 
@@ -137,6 +137,17 @@ All tests return a table with test statistic(s) and p-value.
 | `mann_whitney_u(xs, ys [, opts])` | Mann-Whitney U test. Pass `{tie_correction=true}` as 3rd arg to adjust for ties. Returns `{u_stat, z_score, p_value}` |
 | `chi_squared_test(observed, expected)` | Chi-squared goodness-of-fit. Returns `{chi2_stat, df, p_value}` |
 | `ks_test(xs, ys)` | Two-sample Kolmogorov-Smirnov test. Returns `{d_stat, p_value}` |
+| `permutation_test(xs, ys, draws, seed [, opts])` | Permutation test on the difference in means. Pass `{alternative="greater"\|"less"}` for one-sided. Returns `{observed, p_value, extreme_draws, draws}` |
+
+The first four tests each assume a shape — normality for Welch's t, continuity
+for Mann-Whitney and Kolmogorov-Smirnov, expected counts for chi-squared.
+`permutation_test` assumes only that the labels are exchangeable under the
+null, at the cost of `draws` reshuffles.
+
+Its p-value is `(1 + extreme) / (1 + draws)`, so the floor is `1/(1+draws)`
+rather than zero: the observed arrangement is itself one of the permutations
+under the null, and a p-value of exactly 0 claims more than any finite number
+of draws can support.
 
 ### Ranking & IR metrics
 
@@ -159,6 +170,12 @@ Input distributions must be valid probability distributions (non-negative, sum t
 | `js_divergence(p, q)` | Jensen-Shannon divergence (symmetric, bounded [0, ln 2]) |
 | `cross_entropy(p, q)` | Cross-entropy H(p, q) = -Σ pᵢ ln(qᵢ) |
 | `tvd(p, q)` | Total variation distance 0.5 Σ\|pᵢ - qᵢ\| (symmetric, bounded [0, 1]) |
+| `mutual_information(joint)` | I(X;Y) from a joint distribution matrix |
+
+`mutual_information` takes the **joint** distribution — `joint[i][j] = P(X=i, Y=j)`,
+row-major, summing to 1 — and derives the marginals from it. Zero exactly under
+independence, bounded above by min(H(X), H(Y)). For the joint entropy on its own,
+pass the flattened matrix to `entropy`.
 
 The sum check tolerates `32 × sqrt(n) × 5.96e-8`, which covers the drift a
 distribution normalized in f32 carries once widened to f64 — a 50257-entry
@@ -171,16 +188,29 @@ infinite there. Errors name the element that failed, 1-based as in the Lua table
 
 ### Resampling
 
-Bootstrap intervals where the unit of resampling is the **cluster**, not the
-observation — for measurements that arrive in correlated groups (repeated
-samples from one prompt, several positions from one game). Resampling
-observations independently would understate the spread.
+Bootstrap percentile intervals. Which function applies depends on how the
+measurements arrive.
 
 | Function | Description |
 |----------|-------------|
+| `bootstrap_mean(values, draws, seed [, conf])` | Independent observations, one per resampling unit |
+| `paired_bootstrap_diff(xs, ys, draws, seed [, conf])` | `xs[i]` and `ys[i]` measure the same item; the difference is taken per pair first |
 | `cluster_bootstrap_mean(by_cluster, draws, seed [, conf])` | Percentile interval on the mean |
 | `cluster_bootstrap_diff(a_by_cluster, b_by_cluster, draws, seed [, conf])` | Interval on the difference, both sides from the same draw |
 | `cluster_bootstrap_ratio(num_by_cluster, den_by_cluster, draws, seed [, conf])` | Interval on the ratio of the summed sides |
+
+The **cluster** family resamples the group rather than the observation, for
+measurements that arrive correlated (repeated samples from one prompt, several
+positions from one game). Resampling observations independently there would
+understate the spread. The first two functions are the flat-series case, where
+each observation is its own unit; they report `observations` in place of
+`clusters`.
+
+Pairing and clustering answer different questions and compose: `xs[i]` vs
+`ys[i]` is *the same item measured twice*, while a cluster is *one group of
+correlated measurements*. Use `paired_bootstrap_diff` for two models on one
+prompt set, `cluster_bootstrap_diff` when each of those prompts also carries
+several measurements.
 
 `by_cluster` is a sequence of sequences — one inner table per cluster, holding
 that cluster's observations. An empty cluster is allowed and still takes part
