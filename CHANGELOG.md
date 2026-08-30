@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.5.0] - 2026-08-30
+
+### Added
+
 - **Resampling**: 3 functions — bootstrap confidence intervals over correlated groups, where the unit of resampling is the cluster rather than the observation
   - `cluster_bootstrap_mean(by_cluster, draws, seed [, confidence])` — percentile interval on the mean
   - `cluster_bootstrap_diff(a_by_cluster, b_by_cluster, draws, seed [, confidence])` — interval on the difference, with both sides measured inside the same draw
@@ -24,15 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `cohens_d(xs, ys)` — difference in means, in pooled standard deviations
   - `cliffs_delta(xs, ys)` — `P(x > y) - P(x < y)`, ordinal and distribution-free
 
-### Changed
-
-### Deprecated
-
-### Removed
-
 ### Fixed
 
-### Security
+- **`percentile`'s documentation** called its method "exclusive"; the implementation is the inclusive one (rank `p/100 * (n-1)`, matching R's type 7 and numpy's `linear`). Behavior is unchanged — the label was wrong, and this release makes the bootstrap endpoints share the same function.
 
 ## [0.4.1] - 2026-08-30
 
@@ -144,6 +152,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `iqr(values)` — interquartile range
   - `softmax(values)` — numerically stable softmax
 
+[Unreleased]: https://github.com/ynishi/mlua-mathlib/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.5.0
+[0.4.1]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.4.1
+[0.4.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.4.0
 [0.3.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ynishi/mlua-mathlib/releases/tag/v0.1.0

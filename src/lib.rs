@@ -1,9 +1,12 @@
 #![deny(unsafe_code)]
-//! Math library for mlua — RNG, distributions, and descriptive statistics.
+//! Math library for mlua — RNG, distributions, hypothesis testing, ranking,
+//! information theory, resampling, and statistics.
 //!
-//! Provides math functions that are impractical or numerically unstable
-//! to implement in pure Lua: distribution sampling with proper algorithms,
-//! independent seeded RNG instances, and numerically stable statistics.
+//! Provides math functions that are impractical or numerically unstable to
+//! implement in pure Lua: distribution sampling with proper algorithms,
+//! independent seeded RNG instances, special functions and CDF/PPF, hypothesis
+//! tests with their effect sizes and multiple-comparison adjustments, cluster
+//! bootstrap confidence intervals, and numerically stable statistics.
 //!
 //! # Quick start
 //!

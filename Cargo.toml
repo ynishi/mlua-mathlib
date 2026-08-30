@@ -1,9 +1,9 @@
 [package]
 name = "mlua-mathlib"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.77"
-description = "Math library for mlua — RNG, distributions, hypothesis testing, ranking, information theory, and statistics"
+description = "Math library for mlua — RNG, distributions, hypothesis testing, ranking, information theory, resampling, and statistics"
 license = "MIT OR Apache-2.0"
 authors = ["Yutaka Nishimura"]
 readme = "README.md"
