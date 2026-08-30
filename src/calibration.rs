@@ -7,10 +7,20 @@ use crate::stats::table_to_vec;
 /// Indices are 1-based, matching the Lua tables they come from.
 #[derive(Debug, PartialEq)]
 enum CalibrationError {
+    /// Unreachable from Lua — `table_to_vec` refuses an empty table first.
+    /// Kept as the internal contract for the `_impl` functions.
     Empty,
     LengthMismatch {
         confidences: usize,
         outcomes: usize,
+    },
+    /// A confidence that is `NaN` or `±inf`. Named apart from
+    /// [`Self::OutOfUnitRange`] so the diagnosis is the value's kind rather
+    /// than a range it was never going to satisfy. Unreachable from Lua for
+    /// the same reason as [`Self::Empty`].
+    NonFinite {
+        index: usize,
+        value: f64,
     },
     /// A confidence outside `[0, 1]` — it is a probability, not a score.
     OutOfUnitRange {
@@ -37,6 +47,9 @@ impl std::fmt::Display for CalibrationError {
                 f,
                 "confidences and outcomes must be paired: {confidences} vs {outcomes}"
             ),
+            Self::NonFinite { index, value } => {
+                write!(f, "confidences[{index}] is not finite: {value}")
+            }
             Self::OutOfUnitRange { index, value } => {
                 write!(f, "confidences[{index}] is outside [0, 1]: {value}")
             }
@@ -60,7 +73,13 @@ fn validate(confidences: &[f64], outcomes: &[f64]) -> Result<(), CalibrationErro
         return Err(CalibrationError::Empty);
     }
     for (i, &c) in confidences.iter().enumerate() {
-        if !c.is_finite() || !(0.0..=1.0).contains(&c) {
+        if !c.is_finite() {
+            return Err(CalibrationError::NonFinite {
+                index: i + 1,
+                value: c,
+            });
+        }
+        if !(0.0..=1.0).contains(&c) {
             return Err(CalibrationError::OutOfUnitRange {
                 index: i + 1,
                 value: c,
@@ -93,7 +112,17 @@ struct Bin {
 /// A model is calibrated when the predictions it makes at confidence `c` come
 /// true about `c` of the time. ECE is the gap between those two, averaged over
 /// the bins and weighted by how many predictions each holds; MCE is the widest
-/// single gap. Both are in `[0, 1]` and zero only for perfect calibration.
+/// single gap. Both are in `[0, 1]`.
+///
+/// # Zero does not mean calibrated
+///
+/// It means the confidences and the outcomes averaged out *within each bin of
+/// this partition*. Errors in opposite directions inside one bin cancel: a
+/// model that says 0.4 and is always right, and says 0.6 and is always wrong,
+/// scores ECE 0 at two bins and 0.55 at ten. Its Brier score is 0.36 — worse
+/// than a coin. A low ECE is evidence only alongside the partition it was
+/// computed on and `bins_used`; [`brier_score_impl`] is the measure that cannot
+/// be zeroed this way.
 ///
 /// # Why the bins are equal-width, and fixed
 ///
@@ -112,10 +141,11 @@ fn calibration_error_impl(
     outcomes: &[f64],
     bins: usize,
 ) -> Result<(f64, f64, Vec<Bin>), CalibrationError> {
-    validate(confidences, outcomes)?;
+    // Before reading the inputs, as `histogram` does with its own bin count.
     if bins == 0 {
         return Err(CalibrationError::NoBins);
     }
+    validate(confidences, outcomes)?;
 
     let mut counts = vec![0usize; bins];
     let mut conf_sums = vec![0.0; bins];
@@ -288,16 +318,42 @@ mod tests {
 
     #[test]
     fn bin_count_changes_the_number() {
-        // The same predictions scored over different partitions do not agree —
-        // which is why the bin count is part of what an ECE reports.
-        let conf: Vec<f64> = (0..100).map(|i| i as f64 / 100.0).collect();
-        let out: Vec<f64> = (0..100).map(|i| if i > 50 { 1.0 } else { 0.0 }).collect();
-        let coarse = calibration_error_impl(&conf, &out, 2).unwrap().0;
-        let fine = calibration_error_impl(&conf, &out, 50).unwrap().0;
+        // 50 predictions at 0.05 that all come true, 50 at 0.45 that all fail.
+        // One bin holds both at bins=2 and the errors cancel; at bins=10 they
+        // separate. The gap is 0.25 vs 0.70 — binning is not a detail.
+        let mut conf = vec![0.05; 50];
+        let mut out = vec![1.0; 50];
+        conf.extend(vec![0.45; 50]);
+        out.extend(vec![0.0; 50]);
+
+        let (coarse_ece, coarse_mce, _) = calibration_error_impl(&conf, &out, 2).unwrap();
+        let (fine_ece, fine_mce, _) = calibration_error_impl(&conf, &out, 10).unwrap();
         assert!(
-            (coarse - fine).abs() > 1e-6,
-            "coarse={coarse} fine={fine} — binning is not neutral"
+            fine_ece - coarse_ece > 0.4,
+            "coarse={coarse_ece} fine={fine_ece}"
         );
+        assert!(
+            fine_mce - coarse_mce > 0.4,
+            "MCE moves too: coarse={coarse_mce} fine={fine_mce}"
+        );
+    }
+
+    #[test]
+    fn a_zero_score_does_not_mean_calibrated() {
+        // Wrong in both directions by the same amount: the bin average lands on
+        // the truth while every individual prediction is off. ECE reports
+        // nothing; Brier reports 0.36, worse than a coin's 0.25.
+        let conf = [0.4, 0.6];
+        let out = [1.0, 0.0];
+        let (ece, mce, _) = calibration_error_impl(&conf, &out, 1).unwrap();
+        assert!(ece.abs() < 1e-12, "one bin hides it entirely: {ece}");
+        assert!(mce.abs() < 1e-12);
+        let brier = brier_score_impl(&conf, &out).unwrap();
+        assert!((brier - 0.36).abs() < 1e-12, "but Brier sees it: {brier}");
+
+        // Splitting the bin exposes the same data.
+        let (split, _, _) = calibration_error_impl(&conf, &out, 10).unwrap();
+        assert!(split > 0.5, "at ten bins the gap is plain: {split}");
     }
 
     #[test]
@@ -309,6 +365,11 @@ mod tests {
                 value: 1.5
             }
         );
+        // A non-finite confidence is diagnosed as such, not as a range failure.
+        assert!(matches!(
+            calibration_error_impl(&[0.5, f64::NAN], &[0.0, 1.0], 10).unwrap_err(),
+            CalibrationError::NonFinite { index: 2, .. }
+        ));
         assert_eq!(
             calibration_error_impl(&[0.5, 0.5], &[0.0, 0.5], 10).unwrap_err(),
             CalibrationError::NotBinary {
@@ -326,6 +387,34 @@ mod tests {
         );
         assert_eq!(
             calibration_error_impl(&[], &[], 10).unwrap_err(),
+            CalibrationError::Empty
+        );
+        // The bin count is checked before the inputs are read, so a caller who
+        // got both wrong hears about the argument they control directly.
+        assert_eq!(
+            calibration_error_impl(&[], &[], 0).unwrap_err(),
+            CalibrationError::NoBins
+        );
+    }
+
+    #[test]
+    fn brier_refuses_the_same_malformed_input() {
+        // brier_score shares `validate` with calibration_error; its error path
+        // had no coverage of its own.
+        assert!(matches!(
+            brier_score_impl(&[0.5, 1.5], &[0.0, 1.0]).unwrap_err(),
+            CalibrationError::OutOfUnitRange { index: 2, .. }
+        ));
+        assert!(matches!(
+            brier_score_impl(&[0.5, 0.5], &[0.0, 0.5]).unwrap_err(),
+            CalibrationError::NotBinary { index: 2, .. }
+        ));
+        assert!(matches!(
+            brier_score_impl(&[0.5], &[0.0, 1.0]).unwrap_err(),
+            CalibrationError::LengthMismatch { .. }
+        ));
+        assert_eq!(
+            brier_score_impl(&[], &[]).unwrap_err(),
             CalibrationError::Empty
         );
     }

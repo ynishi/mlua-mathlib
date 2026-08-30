@@ -80,6 +80,10 @@ enum DistError {
         previous: f64,
         value: f64,
     },
+    /// A support with one position per bin was expected. Named separately from
+    /// [`Self::LengthMismatch`], whose `p` / `q` would put the blame on a
+    /// distribution whose length is fine.
+    SupportLengthMismatch { distribution: usize, support: usize },
 }
 
 impl std::fmt::Display for DistError {
@@ -107,6 +111,15 @@ impl std::fmt::Display for DistError {
             }
             Self::NotNormalized { side, sum, tol } => {
                 write!(f, "{side} sums to {sum}, expected 1 ± {tol:e}")
+            }
+            Self::SupportLengthMismatch {
+                distribution,
+                support,
+            } => {
+                write!(
+                    f,
+                    "support needs one position per bin: {distribution} bins, {support} positions"
+                )
             }
             Self::UnorderedSupport {
                 index,
@@ -235,12 +248,26 @@ fn cross_entropy_impl(p: &[f64], q: &[f64]) -> Result<f64, DistError> {
 /// it is bounded and metric; unlike TVD it responds to the *ratio* of the
 /// probabilities rather than their difference, so it separates two small
 /// probabilities that differ by a factor where TVD sees only a small gap.
+///
+/// # Summed from the differences, not from `1 - BC`
+///
+/// `Σ(√p - √q)² = 2 - 2·BC` makes the two forms algebraically identical but not
+/// numerically. As the distributions converge the Bhattacharyya coefficient
+/// approaches 1 and `1 - BC` cancels: that route returns 15x the true distance
+/// at `q = p ± 1e-9` and exactly zero at `1e-8`. Summing the per-element
+/// differences keeps each term at its own scale, and being a sum of squares it
+/// needs no clamp to stay non-negative.
 fn hellinger_impl(p: &[f64], q: &[f64]) -> Result<f64, DistError> {
     validate_pair(p, q)?;
-    // Bhattacharyya coefficient. Bounded above by 1 for normalized inputs, so
-    // the argument of the root is non-negative up to rounding.
-    let bc: f64 = p.iter().zip(q.iter()).map(|(&a, &b)| (a * b).sqrt()).sum();
-    Ok((1.0 - bc).max(0.0).sqrt())
+    let sq: f64 = p
+        .iter()
+        .zip(q.iter())
+        .map(|(&a, &b)| {
+            let d = a.sqrt() - b.sqrt();
+            d * d
+        })
+        .sum();
+    Ok((sq / 2.0).sqrt())
 }
 
 /// 1-Wasserstein distance between two distributions over an **ordered** support.
@@ -268,9 +295,9 @@ fn wasserstein_1d_impl(p: &[f64], q: &[f64], support: Option<&[f64]>) -> Result<
         None => vec![1.0; p.len().saturating_sub(1)],
         Some(x) => {
             if x.len() != p.len() {
-                return Err(DistError::LengthMismatch {
-                    p: p.len(),
-                    q: x.len(),
+                return Err(DistError::SupportLengthMismatch {
+                    distribution: p.len(),
+                    support: x.len(),
                 });
             }
             for (i, w) in x.windows(2).enumerate() {
@@ -689,7 +716,54 @@ mod tests {
             }
         );
         assert!(err.to_string().contains("strictly increasing"));
-        assert!(wasserstein_1d_impl(&p, &q, Some(&[0.0, 1.0, 2.0])).is_err());
+        // The support's length is blamed on the support, not on `q` — whose
+        // length is fine.
+        let len_err = wasserstein_1d_impl(&p, &q, Some(&[0.0, 1.0, 2.0])).unwrap_err();
+        assert_eq!(
+            len_err,
+            DistError::SupportLengthMismatch {
+                distribution: 2,
+                support: 3
+            }
+        );
+        assert!(len_err.to_string().contains("one position per bin"));
+    }
+
+    #[test]
+    fn wasserstein_uses_each_interval_width_not_the_first() {
+        // Unequal spacing: an implementation reusing x[1]-x[0] for every gap
+        // would report 2 here instead of 10.
+        let p = [1.0, 0.0, 0.0];
+        let q = [0.0, 0.0, 1.0];
+        let w = wasserstein_1d_impl(&p, &q, Some(&[0.0, 1.0, 10.0])).unwrap();
+        assert!((w - 10.0).abs() < 1e-12, "got {w}");
+
+        // And the mirror: wide first, narrow second.
+        let w2 = wasserstein_1d_impl(&p, &q, Some(&[0.0, 9.0, 10.0])).unwrap();
+        assert!((w2 - 10.0).abs() < 1e-12, "got {w2}");
+
+        // Mass moved only across the narrow gap costs only that gap.
+        let mid = [0.0, 1.0, 0.0];
+        let narrow = wasserstein_1d_impl(&mid, &q, Some(&[0.0, 9.0, 10.0])).unwrap();
+        assert!((narrow - 1.0).abs() < 1e-12, "got {narrow}");
+    }
+
+    #[test]
+    fn hellinger_stays_accurate_as_the_distributions_converge() {
+        // The `1 - BC` route cancels here: it returns 15x the true value at
+        // 1e-9 and exactly zero at 1e-8. Summing the per-element differences
+        // keeps each term at its own scale.
+        for k in 6..=10 {
+            let e = 10f64.powi(-k);
+            let p = [0.5, 0.5];
+            let q = [0.5 + e, 0.5 - e];
+            let h = hellinger_impl(&p, &q).unwrap();
+            // For p = [1/2, 1/2] and a shift of e the exact distance is e/sqrt(2)
+            // to first order.
+            let expected = e / 2f64.sqrt();
+            let rel = (h - expected).abs() / expected;
+            assert!(rel < 1e-6, "e=1e-{k}: got {h:e}, expected {expected:e}");
+        }
     }
 
     #[test]

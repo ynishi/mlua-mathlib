@@ -194,6 +194,18 @@ measures how far the mass has to travel, so it is the right choice over ordered
 outcomes and the wrong one over unordered categories, where the bin order is
 arbitrary and so would be the answer.
 
+The sum check tolerates `32 × sqrt(n) × 5.96e-8`, which covers the drift a
+distribution normalized in f32 carries once widened to f64 — a 50257-entry
+softmax lands around `1.2e-4`. Since a sum of `1 ± tol` is accepted, `tvd` can
+return marginally more than 1 when both inputs drift upward, `js_divergence`
+marginally more than ln 2, and `hellinger` marginally more than 1.
+`kl_divergence` and `cross_entropy` return `math.huge` where `qᵢ = 0` while
+`pᵢ > 0` rather than raising, since the definition is infinite there.
+`wasserstein_1d` drops the final interval, where both CDFs have reached their
+total and the difference is zero up to that same tolerance. Errors name the
+element that failed, 1-based as in the Lua table (`p[3] is negative: -0.1` for
+a pairwise call, `probs[3] ...` for `entropy`).
+
 ### Calibration
 
 Whether a model's stated confidence matches how often it turns out right.
@@ -218,19 +230,22 @@ does a different bin count, so an ECE is only comparable against one computed th
 same way — a flag would make it easy to compare two numbers that are not
 comparable. Empty bins contribute nothing rather than counting as a zero gap.
 
-Read the two together. Brier is a **proper scoring rule** and ECE is not: a model
-that predicts the base rate for everything is perfectly calibrated and useless,
-scoring ECE 0 and Brier 0.25 at a 50% base rate. ECE says whether the confidences
-are honest; Brier says whether they are also informative.
+**An ECE of zero does not mean calibrated.** It means the confidences and the
+outcomes averaged out within each bin of that partition, and errors in opposite
+directions inside one bin cancel. A model that says 0.4 and is always right, and
+says 0.6 and is always wrong, scores ECE 0 at two bins — and 0.55 at ten. Read a
+low ECE alongside the bin count it was computed on and `bins_used`.
 
-The sum check tolerates `32 × sqrt(n) × 5.96e-8`, which covers the drift a
-distribution normalized in f32 carries once widened to f64 — a 50257-entry
-softmax lands around `1.2e-4`. Since a sum of `1 ± tol` is accepted, `tvd` can
-return marginally more than 1 when both inputs drift upward, and `js_divergence`
-marginally more than ln 2. `kl_divergence` and `cross_entropy` return `math.huge`
-where `qᵢ = 0` while `pᵢ > 0` rather than raising, since the definition is
-infinite there. Errors name the element that failed, 1-based as in the Lua table
-(`p[3] is negative: -0.1` for a pairwise call, `probs[3] ...` for `entropy`).
+Read the two measures together. Brier is a **proper scoring rule** and ECE is
+not, so it cannot be zeroed that way: the model above scores 0.36, worse than a
+coin. The other direction is a model predicting the base rate for everything —
+perfectly calibrated and useless, ECE 0 and Brier 0.25 at a 50% base rate. ECE
+says whether the confidences are honest; Brier says whether they are also
+informative.
+
+The bin edges are left-closed, `[m/M, (m+1)/M)`, with `1.0` placed in the last
+bin. Guo et al. define them right-closed; the numbers differ only for a
+confidence landing exactly on an edge.
 
 ### Resampling
 
